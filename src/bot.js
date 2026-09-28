@@ -1,5 +1,4 @@
 require("dotenv").config();
-
 const {
   Client, GatewayIntentBits, EmbedBuilder,
   ActionRowBuilder, ButtonBuilder, ButtonStyle
@@ -15,20 +14,17 @@ for (const name of ["DISCORD_TOKEN", "OWNER_ID", "APPROVAL_CHANNEL_ID", "DATABAS
 }
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
 let loginInProgress = false;
 let slashCommandsRegistered = false;
 
 client.once("ready", async () => {
   console.log(`Discord bot is READY as ${client.user.tag} (${client.user.id})`);
   console.log(`Connected to ${client.guilds.cache.size} guild(s).`);
-
   try {
     const approvalChannel = await client.channels.fetch(String(process.env.APPROVAL_CHANNEL_ID)).catch((err) => {
       console.error("Could not fetch APPROVAL_CHANNEL_ID:", err?.message || err);
       return null;
     });
-
     const guild = approvalChannel?.guild;
     if (guild) {
       await guild.commands.set(slashCommands);
@@ -45,22 +41,19 @@ client.once("ready", async () => {
 client.on("error", (err) => {
   console.error("Discord client error:", err?.message || err);
 });
-
 client.on("shardError", (err) => {
   console.error("Discord shard error:", err?.message || err);
 });
-
 client.on("shardDisconnect", (event, shardId) => {
   console.error(`Discord shard ${shardId} disconnected:`, event?.code, event?.reason || "");
 });
-
 client.on("shardReconnecting", (shardId) => {
   console.log(`Discord shard ${shardId} is reconnecting...`);
 });
-
 client.on("shardReady", (shardId) => {
   console.log(`Discord shard ${shardId} is ready.`);
 });
+
 const app = express();
 app.use(express.json());
 
@@ -77,21 +70,17 @@ async function initDb() {
       first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       logged_at TIMESTAMPTZ
     );
-
     ALTER TABLE hub_users ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ;
-
     CREATE TABLE IF NOT EXISTS permanent_whitelist (
       user_id TEXT PRIMARY KEY,
       username TEXT,
       approved_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS permanent_blacklist (
       user_id TEXT PRIMARY KEY,
       username TEXT,
       blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS access_sessions (
       session_id TEXT PRIMARY KEY,
       user_id TEXT NOT NULL,
@@ -105,8 +94,6 @@ async function initDb() {
 async function logNewHubUser(userId, username) {
   const id = String(userId).trim();
   const name = String(username || "unknown").trim();
-
-  // If this user was already successfully logged, do nothing.
   const existing = await pool.query(
     "SELECT logged_at FROM hub_users WHERE user_id = $1 LIMIT 1",
     [id]
@@ -118,12 +105,10 @@ async function logNewHubUser(userId, username) {
     console.error("ROBLOX_LOG_CHANNEL_ID is not set; cannot log new Roblox users.");
     return false;
   }
-
   const channel = await client.channels.fetch(channelId).catch((err) => {
     console.error("Could not fetch ROBLOX_LOG_CHANNEL_ID:", err?.message || err);
     return null;
   });
-
   if (!channel || !channel.isTextBased()) {
     console.error("ROBLOX_LOG_CHANNEL_ID is not a text-based Discord channel.");
     return false;
@@ -147,7 +132,6 @@ async function logNewHubUser(userId, username) {
     return false;
   }
 
-  // Only mark the user as logged AFTER Discord accepted the message.
   await pool.query(
     `INSERT INTO hub_users (user_id, username, logged_at)
      VALUES ($1, $2, NOW())
@@ -155,24 +139,20 @@ async function logNewHubUser(userId, username) {
      DO UPDATE SET username = EXCLUDED.username, logged_at = NOW()`,
     [id, name]
   );
-
   console.log(`Logged new Roblox user ${name} (${id}) to channel ${channelId}`);
   return true;
 }
 
 async function getPermanentStatus(userId) {
   const id = String(userId);
-
   const black = await pool.query(
     "SELECT 1 FROM permanent_blacklist WHERE user_id = $1 LIMIT 1", [id]
   );
   if (black.rowCount) return "blacklisted";
-
   const white = await pool.query(
     "SELECT 1 FROM permanent_whitelist WHERE user_id = $1 LIMIT 1", [id]
   );
   if (white.rowCount) return "whitelisted";
-
   return "none";
 }
 
@@ -225,7 +205,6 @@ async function addBlacklist(userId, username) {
     "DELETE FROM access_sessions WHERE user_id = $1", [String(userId)]
   );
 }
-
 
 async function removeWhitelist(userId) {
   const result = await pool.query(
@@ -302,7 +281,6 @@ app.get("/wake", (_req, res) => {
       message: "Discord bot is already online."
     });
   }
-
   if (loginInProgress) {
     return res.status(202).json({
       ok: true,
@@ -310,11 +288,7 @@ app.get("/wake", (_req, res) => {
       message: "Discord login is already in progress. Check Render logs in a few seconds."
     });
   }
-
-  // Do not wait for Discord here. Render needs the HTTP request to finish quickly,
-  // while the Gateway connection continues in the background.
   loginDiscord("/wake");
-
   return res.status(202).json({
     ok: true,
     connected: false,
@@ -333,31 +307,23 @@ app.get("/check", async (req, res) => {
   try {
     const userId = String(req.query.userId || "").trim();
     const sessionId = String(req.query.sessionId || "").trim();
-
     if (!userId || !sessionId) {
       return res.status(400).json({ approved: false });
     }
-
     const permanent = await getPermanentStatus(userId);
-
     if (permanent === "blacklisted") {
       return res.json({ approved: false, denied: true, blacklisted: true });
     }
-
     if (permanent === "whitelisted") {
       return res.json({ approved: true, whitelisted: true });
     }
-
     const decision = await getSessionDecision(userId, sessionId);
-
     if (decision === "accepted") {
       return res.json({ approved: true });
     }
-
     if (decision === "denied") {
       return res.json({ approved: false, denied: true });
     }
-
     res.json({ approved: false });
   } catch (err) {
     console.error("check error:", err);
@@ -370,33 +336,26 @@ app.post("/request", async (req, res) => {
     const {
       username, userId, displayName, place, jobId, placeId, sessionId
     } = req.body;
-
     if (!username || !userId || !sessionId) {
       return res.status(400).json({
         error: "missing username, userId, or sessionId"
       });
     }
 
-    // Record every Roblox account the first time it requests hub access.
-    // This is intentionally done in /request because /check does not receive a username.
     await logNewHubUser(userId, username);
 
     const permanent = await getPermanentStatus(userId);
-
     if (permanent === "blacklisted") {
       return res.json({ ok: true, approved: false, blacklisted: true });
     }
-
     if (permanent === "whitelisted") {
       return res.json({ ok: true, approved: true, whitelisted: true });
     }
 
     const decision = await getSessionDecision(userId, sessionId);
-
     if (decision === "accepted") {
       return res.json({ ok: true, approved: true });
     }
-
     if (decision === "denied") {
       return res.json({ ok: true, approved: false, denied: true });
     }
@@ -438,7 +397,6 @@ app.post("/request", async (req, res) => {
       console.error("Could not fetch OWNER_ID:", err?.message || err);
       return null;
     });
-
     if (!owner) {
       return res.status(500).json({ error: "could not find OWNER_ID on Discord" });
     }
@@ -461,33 +419,40 @@ app.post("/request", async (req, res) => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  // ===== COPY ID BUTTON =====
   if (interaction.isButton() && interaction.customId.startsWith("copyid:")) {
     if (interaction.user.id !== process.env.OWNER_ID) {
       return interaction.reply({ content: "Only the owner can use this button.", ephemeral: true });
     }
-
     const userId = interaction.customId.slice("copyid:".length);
     if (!/^\d+$/.test(userId)) {
       return interaction.reply({ content: "❌ Invalid Roblox UserId.", ephemeral: true });
     }
-
     return interaction.reply({
       content: `📋 **Roblox UserId**\n\`\`\`text\n${userId}\n\`\`\`\nUse Discord's copy button on the code block to copy it.`,
       ephemeral: true
     });
   }
 
+  // ===== SLASH COMMANDS =====
   if (interaction.isChatInputCommand()) {
+    // Acknowledge IMMEDIATELY (most important fix)
+    try {
+      await interaction.deferReply({ ephemeral: true });
+    } catch (err) {
+      console.error("Failed to defer reply (interaction probably already expired):", err?.message || err);
+      return;
+    }
+
+    // Owner check after defer
     if (interaction.user.id !== process.env.OWNER_ID) {
-      return interaction.reply({ content: "Only the owner can use these commands.", ephemeral: true });
+      return interaction.editReply({ content: "Only the owner can use these commands." });
     }
 
     try {
       const command = interaction.commandName;
       const userId = interaction.options.getString("user_id")?.trim();
       const username = interaction.options.getString("username")?.trim() || "unknown";
-
-      await interaction.deferReply({ ephemeral: true });
 
       if (command === "whitelist") {
         if (!/^\d+$/.test(userId || "")) {
@@ -544,15 +509,12 @@ client.on("interactionCreate", async (interaction) => {
       return interaction.editReply("Unknown command.");
     } catch (err) {
       console.error("slash command error:", err);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply("❌ Database error while running that command.").catch(() => {});
-      } else {
-        await interaction.reply({ content: "❌ Database error while running that command.", ephemeral: true }).catch(() => {});
-      }
+      await interaction.editReply("❌ Database error while running that command.").catch(() => {});
     }
     return;
   }
 
+  // ===== APPROVAL BUTTONS =====
   if (!interaction.isButton()) return;
 
   if (interaction.user.id !== process.env.OWNER_ID) {
@@ -569,9 +531,12 @@ client.on("interactionCreate", async (interaction) => {
   const username = parts.slice(3).join(":") || "unknown";
 
   try {
+    // Acknowledge the button IMMEDIATELY
+    await interaction.deferUpdate();
+
     if (action === "accept") {
       await setSessionDecision(userId, username, sessionId, "accepted");
-      await interaction.update({
+      await interaction.editReply({
         content: `✅ **Accepted for this session only** — \`${username}\`\nThis does NOT whitelist them.`,
         embeds: interaction.message.embeds,
         components: []
@@ -581,7 +546,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (action === "deny") {
       await setSessionDecision(userId, username, sessionId, "denied");
-      await interaction.update({
+      await interaction.editReply({
         content: `❌ **Denied** — \`${username}\`\nThis does NOT blacklist them.`,
         embeds: interaction.message.embeds,
         components: []
@@ -592,7 +557,7 @@ client.on("interactionCreate", async (interaction) => {
     if (action === "whitelist") {
       await addWhitelist(userId, username);
       await setSessionDecision(userId, username, sessionId, "accepted");
-      await interaction.update({
+      await interaction.editReply({
         content: `✅ **Whitelisted permanently** — \`${username}\``,
         embeds: interaction.message.embeds,
         components: []
@@ -602,7 +567,7 @@ client.on("interactionCreate", async (interaction) => {
 
     if (action === "blacklist") {
       await addBlacklist(userId, username);
-      await interaction.update({
+      await interaction.editReply({
         content: `⛔ **Blacklisted permanently** — \`${username}\``,
         embeds: interaction.message.embeds,
         components: []
@@ -611,12 +576,12 @@ client.on("interactionCreate", async (interaction) => {
     }
   } catch (err) {
     console.error("interaction error:", err);
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
+    try {
+      await interaction.editReply({
         content: "Database error while updating this request.",
-        ephemeral: true
-      }).catch(() => {});
-    }
+        components: []
+      });
+    } catch {}
   }
 });
 
@@ -651,15 +616,11 @@ async function checkDiscordGateway() {
 
 async function loginDiscord(reason = "startup") {
   if (client.isReady() || loginInProgress) return;
-
   loginInProgress = true;
   console.log(`Attempting Discord login (${reason})...`);
 
-  // Discord.js can leave login() pending when the Gateway/WebSocket cannot be
-  // reached. Force a bounded attempt so Render does not sit silently forever.
   try {
     await checkDiscordGateway();
-
     const loginPromise = client.login(process.env.DISCORD_TOKEN);
     await Promise.race([
       loginPromise,
@@ -667,19 +628,15 @@ async function loginDiscord(reason = "startup") {
         setTimeout(() => reject(new Error("Discord login attempt exceeded 30 seconds; Gateway connection may be blocked or unreachable from this host.")), 30000)
       )
     ]);
-
     retryAttempt = 0;
     console.log("Discord login call completed; waiting for READY event...");
   } catch (err) {
     console.error("Discord login failed or timed out:");
     console.error(err?.stack || err);
-
     const status = err?.status ?? err?.statusCode ?? err?.response?.status;
     const code = err?.code ?? err?.cause?.code;
     if (status) console.error(`Discord/HTTP status: ${status}`);
     if (code) console.error(`Error code: ${code}`);
-
-    // Reset the client so the next attempt starts a fresh Gateway connection.
     try { client.destroy(); } catch {}
     scheduleDiscordRetry();
   } finally {
@@ -689,12 +646,9 @@ async function loginDiscord(reason = "startup") {
 
 function scheduleDiscordRetry() {
   if (client.isReady() || retryTimer) return;
-
   retryAttempt += 1;
   const delay = Math.min(300000, 15000 * Math.pow(2, Math.min(retryAttempt - 1, 4)));
-
   console.log(`Discord reconnect attempt #${retryAttempt} scheduled in ${Math.round(delay / 1000)} seconds.`);
-
   retryTimer = setTimeout(() => {
     retryTimer = null;
     loginDiscord(`automatic retry #${retryAttempt}`);
@@ -703,14 +657,10 @@ function scheduleDiscordRetry() {
 
 async function start() {
   await initDb();
-
   const port = Number(process.env.PORT || 10000);
   app.listen(port, "0.0.0.0", () => {
     console.log(`HTTP server listening on ${port}`);
   });
-
-  // Keep Render's web process alive even if Discord temporarily rejects the
-  // connection. The bot will keep retrying instead of crashing the service.
   loginDiscord("startup");
 }
 
