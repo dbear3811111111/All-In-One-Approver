@@ -41,7 +41,6 @@ const pool = new Pool({
   }
 });
 
-
 // =========================
 // DISCORD READY
 // =========================
@@ -82,7 +81,6 @@ client.once("ready", async () => {
         "Could not find APPROVAL_CHANNEL_ID guild; slash commands were not registered."
       );
     }
-
   } catch (err) {
     console.error(
       "Slash-command registration failed:",
@@ -90,7 +88,6 @@ client.once("ready", async () => {
     );
   }
 });
-
 
 // =========================
 // DISCORD EVENTS
@@ -129,7 +126,6 @@ client.on("shardReady", (shardId) => {
     `Discord shard ${shardId} is ready.`
   );
 });
-
 
 // =========================
 // DATABASE
@@ -170,7 +166,6 @@ async function initDb() {
 
   console.log("Database initialized.");
 }
-
 
 // =========================
 // LOG NEW ROBLOX USER
@@ -238,7 +233,6 @@ async function logNewHubUser(userId, username) {
         `User ID: \`${id}\``,
       components: [logRow]
     });
-
   } catch (err) {
     console.error(
       "Could not send new-user log:",
@@ -268,7 +262,6 @@ async function logNewHubUser(userId, username) {
 
   return true;
 }
-
 
 // =========================
 // ACCESS STATUS
@@ -308,7 +301,6 @@ async function getPermanentStatus(userId) {
   return "none";
 }
 
-
 async function getSessionDecision(userId, sessionId) {
   const result = await pool.query(
     `
@@ -328,7 +320,6 @@ async function getSessionDecision(userId, sessionId) {
     ? result.rows[0].decision
     : "none";
 }
-
 
 async function setSessionDecision(
   userId,
@@ -364,7 +355,6 @@ async function setSessionDecision(
   );
 }
 
-
 // =========================
 // WHITELIST / BLACKLIST
 // =========================
@@ -395,7 +385,6 @@ async function addWhitelist(userId, username) {
     [String(userId)]
   );
 }
-
 
 async function addBlacklist(userId, username) {
   await pool.query(
@@ -432,7 +421,6 @@ async function addBlacklist(userId, username) {
   );
 }
 
-
 async function removeWhitelist(userId) {
   const result = await pool.query(
     `
@@ -445,7 +433,6 @@ async function removeWhitelist(userId) {
   return result.rowCount > 0;
 }
 
-
 async function removeBlacklist(userId) {
   const result = await pool.query(
     `
@@ -457,7 +444,6 @@ async function removeBlacklist(userId) {
 
   return result.rowCount > 0;
 }
-
 
 async function getLists() {
   const white = await pool.query(
@@ -481,7 +467,6 @@ async function getLists() {
     blacklist: black.rows
   };
 }
-
 
 // =========================
 // SLASH COMMANDS
@@ -567,7 +552,6 @@ const slashCommands = [
   }
 ];
 
-
 // =========================
 // WEB SERVER
 // =========================
@@ -579,7 +563,6 @@ app.get("/", (_req, res) => {
       : "All-In-One Approver web service is online, but the Discord bot is not connected."
   );
 });
-
 
 // =========================
 // WAKE
@@ -614,7 +597,6 @@ app.get("/wake", (_req, res) => {
   });
 });
 
-
 // =========================
 // HEALTH
 // =========================
@@ -627,7 +609,6 @@ app.get("/health", (_req, res) => {
     slashCommandsRegistered
   });
 });
-
 
 // =========================
 // ROBLOX CHECK
@@ -729,7 +710,6 @@ app.get("/check", async (req, res) => {
     });
   }
 });
-
 
 // =========================
 // ACCESS REQUEST
@@ -930,7 +910,6 @@ app.post("/request", async (req, res) => {
   }
 });
 
-
 // =========================
 // DISCORD INTERACTIONS
 // =========================
@@ -978,7 +957,6 @@ client.on(
       });
     }
 
-
     // SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
 
@@ -1012,7 +990,6 @@ client.on(
           ephemeral: true
         });
 
-
         // /whitelist
         if (command === "whitelist") {
 
@@ -1033,7 +1010,6 @@ client.on(
           );
         }
 
-
         // /blacklist
         if (command === "blacklist") {
 
@@ -1053,7 +1029,6 @@ client.on(
             `(UserId: \`${userId}\`).`
           );
         }
-
 
         // /unwhitelist
         if (command === "unwhitelist") {
@@ -1076,7 +1051,6 @@ client.on(
           );
         }
 
-
         // /unblacklist
         if (command === "unblacklist") {
 
@@ -1097,7 +1071,6 @@ client.on(
               : `ℹ️ UserId \`${userId}\` was not on the permanent blacklist.`
           );
         }
-
 
         // /list
         if (command === "list") {
@@ -1150,7 +1123,6 @@ client.on(
           });
         }
 
-
         return interaction.editReply(
           "Unknown command."
         );
@@ -1185,7 +1157,6 @@ client.on(
       return;
     }
 
-
     // BUTTONS
     if (!interaction.isButton()) {
       return;
@@ -1215,7 +1186,6 @@ client.on(
         .join(":") ||
       "unknown";
 
-
     try {
 
       // ACCEPT
@@ -1240,7 +1210,6 @@ client.on(
         return;
       }
 
-
       // DENY
       if (action === "deny") {
 
@@ -1262,7 +1231,6 @@ client.on(
 
         return;
       }
-
 
       // WHITELIST
       if (action === "whitelist") {
@@ -1289,7 +1257,6 @@ client.on(
 
         return;
       }
-
 
       // BLACKLIST
       if (action === "blacklist") {
@@ -1333,20 +1300,15 @@ client.on(
   }
 );
 
-
 // =========================
 // DISCORD LOGIN
 // =========================
 
-async function loginDiscord(
-  reason = "startup"
-) {
-
+async function loginDiscord(reason = "startup") {
   if (client.isReady()) {
     console.log(
       `Discord is already connected; ignoring login request (${reason}).`
     );
-
     return true;
   }
 
@@ -1354,7 +1316,6 @@ async function loginDiscord(
     console.log(
       `Discord login is already in progress; ignoring login request (${reason}).`
     );
-
     return false;
   }
 
@@ -1362,7 +1323,6 @@ async function loginDiscord(
     console.error(
       "DISCORD_TOKEN is missing; cannot connect to Discord."
     );
-
     return false;
   }
 
@@ -1373,14 +1333,30 @@ async function loginDiscord(
   );
 
   try {
-
-    // IMPORTANT:
-    // Do NOT manually call Discord's /gateway endpoint.
-    // discord.js handles the Gateway connection itself.
-
-    await client.login(
-      process.env.DISCORD_TOKEN
+    console.log(
+      "Connecting to Discord Gateway..."
     );
+
+    const loginPromise =
+      client.login(
+        process.env.DISCORD_TOKEN
+      );
+
+    const timeoutPromise =
+      new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(
+            new Error(
+              "Discord login timed out after 45 seconds. The Discord Gateway may be blocked or rate-limited."
+            )
+          );
+        }, 45000);
+      });
+
+    await Promise.race([
+      loginPromise,
+      timeoutPromise
+    ]);
 
     console.log(
       "Discord login call completed; waiting for READY event..."
@@ -1422,11 +1398,9 @@ async function loginDiscord(
     return false;
 
   } finally {
-
     loginInProgress = false;
   }
 }
-
 
 // =========================
 // START
@@ -1453,7 +1427,6 @@ async function start() {
 
   loginDiscord("startup");
 }
-
 
 start().catch((err) => {
 
