@@ -36,75 +36,15 @@ app.use(express.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: {
+    rejectUnauthorized: false
+  }
 });
 
-const slashCommands = [
-  {
-    name: "whitelist",
-    description: "Permanently allow a user to open the hub",
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      },
-      {
-        name: "username",
-        description: "Roblox username (optional)",
-        type: 3,
-        required: false
-      }
-    ]
-  },
-  {
-    name: "blacklist",
-    description: "Permanently deny a user from opening the hub",
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      },
-      {
-        name: "username",
-        description: "Roblox username (optional)",
-        type: 3,
-        required: false
-      }
-    ]
-  },
-  {
-    name: "unwhitelist",
-    description: "Remove a user from the whitelist",
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      }
-    ]
-  },
-  {
-    name: "unblacklist",
-    description: "Remove a user from the blacklist",
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      }
-    ]
-  },
-  {
-    name: "list",
-    description: "Show current whitelist and blacklist"
-  }
-];
+
+// =========================
+// DISCORD READY
+// =========================
 
 client.once("ready", async () => {
   console.log(
@@ -123,6 +63,7 @@ client.once("ready", async () => {
           "Could not fetch APPROVAL_CHANNEL_ID:",
           err?.message || err
         );
+
         return null;
       });
 
@@ -141,6 +82,7 @@ client.once("ready", async () => {
         "Could not find APPROVAL_CHANNEL_ID guild; slash commands were not registered."
       );
     }
+
   } catch (err) {
     console.error(
       "Slash-command registration failed:",
@@ -148,6 +90,11 @@ client.once("ready", async () => {
     );
   }
 });
+
+
+// =========================
+// DISCORD EVENTS
+// =========================
 
 client.on("error", (err) => {
   console.error(
@@ -226,7 +173,7 @@ async function initDb() {
 
 
 // =========================
-// USER LOGGING
+// LOG NEW ROBLOX USER
 // =========================
 
 async function logNewHubUser(userId, username) {
@@ -234,12 +181,7 @@ async function logNewHubUser(userId, username) {
   const name = String(username || "unknown").trim();
 
   const existing = await pool.query(
-    `
-    SELECT logged_at
-    FROM hub_users
-    WHERE user_id = $1
-    LIMIT 1
-    `,
+    "SELECT logged_at FROM hub_users WHERE user_id = $1 LIMIT 1",
     [id]
   );
 
@@ -256,7 +198,7 @@ async function logNewHubUser(userId, username) {
 
   if (!channelId) {
     console.error(
-      "ROBLOX_LOG_CHANNEL_ID is not set."
+      "ROBLOX_LOG_CHANNEL_ID is not set; cannot log new Roblox users."
     );
 
     return false;
@@ -296,6 +238,7 @@ async function logNewHubUser(userId, username) {
         `User ID: \`${id}\``,
       components: [logRow]
     });
+
   } catch (err) {
     console.error(
       "Could not send new-user log:",
@@ -320,7 +263,7 @@ async function logNewHubUser(userId, username) {
   );
 
   console.log(
-    `Logged new Roblox user ${name} (${id})`
+    `Logged new Roblox user ${name} (${id}) to channel ${channelId}`
   );
 
   return true;
@@ -328,7 +271,7 @@ async function logNewHubUser(userId, username) {
 
 
 // =========================
-// ACCESS FUNCTIONS
+// ACCESS STATUS
 // =========================
 
 async function getPermanentStatus(userId) {
@@ -365,6 +308,7 @@ async function getPermanentStatus(userId) {
   return "none";
 }
 
+
 async function getSessionDecision(userId, sessionId) {
   const result = await pool.query(
     `
@@ -384,6 +328,7 @@ async function getSessionDecision(userId, sessionId) {
     ? result.rows[0].decision
     : "none";
 }
+
 
 async function setSessionDecision(
   userId,
@@ -419,6 +364,11 @@ async function setSessionDecision(
   );
 }
 
+
+// =========================
+// WHITELIST / BLACKLIST
+// =========================
+
 async function addWhitelist(userId, username) {
   await pool.query(
     `
@@ -445,6 +395,7 @@ async function addWhitelist(userId, username) {
     [String(userId)]
   );
 }
+
 
 async function addBlacklist(userId, username) {
   await pool.query(
@@ -481,6 +432,7 @@ async function addBlacklist(userId, username) {
   );
 }
 
+
 async function removeWhitelist(userId) {
   const result = await pool.query(
     `
@@ -492,6 +444,7 @@ async function removeWhitelist(userId) {
 
   return result.rowCount > 0;
 }
+
 
 async function removeBlacklist(userId) {
   const result = await pool.query(
@@ -505,8 +458,9 @@ async function removeBlacklist(userId) {
   return result.rowCount > 0;
 }
 
+
 async function getLists() {
-  const whitelist = await pool.query(
+  const white = await pool.query(
     `
     SELECT user_id, username, approved_at
     FROM permanent_whitelist
@@ -514,7 +468,7 @@ async function getLists() {
     `
   );
 
-  const blacklist = await pool.query(
+  const black = await pool.query(
     `
     SELECT user_id, username, blocked_at
     FROM permanent_blacklist
@@ -523,14 +477,99 @@ async function getLists() {
   );
 
   return {
-    whitelist: whitelist.rows,
-    blacklist: blacklist.rows
+    whitelist: white.rows,
+    blacklist: black.rows
   };
 }
 
 
 // =========================
-// WEB ROUTES
+// SLASH COMMANDS
+// =========================
+
+const slashCommands = [
+  {
+    name: "whitelist",
+    description:
+      "Permanently allow a user to open the hub",
+
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      },
+      {
+        name: "username",
+        description: "Roblox username (optional)",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "blacklist",
+    description:
+      "Permanently deny a user from opening the hub",
+
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      },
+      {
+        name: "username",
+        description: "Roblox username (optional)",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+
+  {
+    name: "unwhitelist",
+    description:
+      "Remove a user from the whitelist",
+
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+
+  {
+    name: "unblacklist",
+    description:
+      "Remove a user from the blacklist",
+
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+
+  {
+    name: "list",
+    description:
+      "Show current whitelist and blacklist"
+  }
+];
+
+
+// =========================
+// WEB SERVER
 // =========================
 
 app.get("/", (_req, res) => {
@@ -542,16 +581,17 @@ app.get("/", (_req, res) => {
 });
 
 
-// IMPORTANT:
-// /wake does NOT perform a gateway HTTP request.
-// It only starts one Discord.js login if needed.
+// =========================
+// WAKE
+// =========================
 
 app.get("/wake", (_req, res) => {
   if (client.isReady()) {
     return res.status(200).json({
       ok: true,
       connected: true,
-      message: "Discord bot is already online."
+      message:
+        "Discord bot is already online."
     });
   }
 
@@ -560,7 +600,7 @@ app.get("/wake", (_req, res) => {
       ok: true,
       connected: false,
       message:
-        "Discord login is already in progress. Check /health."
+        "Discord login is already in progress. Check Render logs in a few seconds."
     });
   }
 
@@ -570,10 +610,14 @@ app.get("/wake", (_req, res) => {
     ok: true,
     connected: false,
     message:
-      "Discord login started. Check /health or Render logs."
+      "Discord login started in the background. Check /health or Render logs."
   });
 });
 
+
+// =========================
+// HEALTH
+// =========================
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -619,9 +663,8 @@ app.get("/check", async (req, res) => {
       );
     });
 
-    const status = await getPermanentStatus(
-      userId
-    );
+    const status =
+      await getPermanentStatus(userId);
 
     if (status === "blacklisted") {
       return res.json({
@@ -798,6 +841,7 @@ app.post("/request", async (req, res) => {
 
     const row =
       new ActionRowBuilder().addComponents(
+
         new ButtonBuilder()
           .setCustomId(
             `accept:${userId}:${sessionId}:${username}`
@@ -849,7 +893,8 @@ app.post("/request", async (req, res) => {
     }
 
     try {
-      const dm = await owner.createDM();
+      const dm =
+        await owner.createDM();
 
       await dm.send({
         embeds: [embed],
@@ -870,8 +915,7 @@ app.post("/request", async (req, res) => {
 
     return res.json({
       ok: true,
-      approved: false,
-      pending: true
+      approved: false
     });
 
   } catch (err) {
@@ -895,7 +939,7 @@ client.on(
   "interactionCreate",
   async (interaction) => {
 
-    // COPY USER ID BUTTON
+    // COPY USER ID
     if (
       interaction.isButton() &&
       interaction.customId.startsWith("copyid:")
@@ -950,7 +994,6 @@ client.on(
       }
 
       try {
-
         const command =
           interaction.commandName;
 
@@ -970,6 +1013,7 @@ client.on(
         });
 
 
+        // /whitelist
         if (command === "whitelist") {
 
           if (!/^\d+$/.test(userId || "")) {
@@ -990,6 +1034,7 @@ client.on(
         }
 
 
+        // /blacklist
         if (command === "blacklist") {
 
           if (!/^\d+$/.test(userId || "")) {
@@ -1010,11 +1055,12 @@ client.on(
         }
 
 
+        // /unwhitelist
         if (command === "unwhitelist") {
 
           if (!/^\d+$/.test(userId || "")) {
             return interaction.editReply(
-              "❌ Invalid Roblox UserId.`
+              "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
@@ -1031,11 +1077,12 @@ client.on(
         }
 
 
+        // /unblacklist
         if (command === "unblacklist") {
 
           if (!/^\d+$/.test(userId || "")) {
             return interaction.editReply(
-              "❌ Invalid Roblox UserId."
+              "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
@@ -1052,6 +1099,7 @@ client.on(
         }
 
 
+        // /list
         if (command === "list") {
 
           const {
@@ -1138,10 +1186,10 @@ client.on(
     }
 
 
+    // BUTTONS
     if (!interaction.isButton()) {
       return;
     }
-
 
     if (
       interaction.user.id !==
@@ -1153,7 +1201,6 @@ client.on(
         ephemeral: true
       });
     }
-
 
     const parts =
       interaction.customId.split(":");
@@ -1171,6 +1218,7 @@ client.on(
 
     try {
 
+      // ACCEPT
       if (action === "accept") {
 
         await setSessionDecision(
@@ -1193,6 +1241,7 @@ client.on(
       }
 
 
+      // DENY
       if (action === "deny") {
 
         await setSessionDecision(
@@ -1215,6 +1264,7 @@ client.on(
       }
 
 
+      // WHITELIST
       if (action === "whitelist") {
 
         await addWhitelist(
@@ -1241,6 +1291,7 @@ client.on(
       }
 
 
+      // BLACKLIST
       if (action === "blacklist") {
 
         await addBlacklist(
@@ -1299,7 +1350,6 @@ async function loginDiscord(
     return true;
   }
 
-
   if (loginInProgress) {
     console.log(
       `Discord login is already in progress; ignoring login request (${reason}).`
@@ -1307,7 +1357,6 @@ async function loginDiscord(
 
     return false;
   }
-
 
   if (!process.env.DISCORD_TOKEN) {
     console.error(
@@ -1317,18 +1366,18 @@ async function loginDiscord(
     return false;
   }
 
-
   loginInProgress = true;
 
   console.log(
     `Attempting Discord login (${reason})...`
   );
 
-
   try {
 
-    // Discord.js handles the Gateway connection itself.
-    // No manual /gateway HTTP request.
+    // IMPORTANT:
+    // Do NOT manually call Discord's /gateway endpoint.
+    // discord.js handles the Gateway connection itself.
+
     await client.login(
       process.env.DISCORD_TOKEN
     );
@@ -1370,10 +1419,6 @@ async function loginDiscord(
       );
     }
 
-    // IMPORTANT:
-    // Do not immediately retry.
-    // Discord.js handles Gateway reconnects itself.
-
     return false;
 
   } finally {
@@ -1384,43 +1429,38 @@ async function loginDiscord(
 
 
 // =========================
-// START SERVER
+// START
 // =========================
 
 async function start() {
 
-  try {
+  await initDb();
 
-    await initDb();
+  const port =
+    Number(
+      process.env.PORT || 10000
+    );
 
-    const port =
-      Number(
-        process.env.PORT || 10000
+  app.listen(
+    port,
+    "0.0.0.0",
+    () => {
+      console.log(
+        `HTTP server listening on ${port}`
       );
+    }
+  );
 
-    app.listen(
-      port,
-      "0.0.0.0",
-      () => {
-        console.log(
-          `HTTP server listening on ${port}`
-        );
-      }
-    );
-
-    // ONE login attempt on startup.
-    // No gateway diagnostic request.
-    loginDiscord("startup");
-
-  } catch (err) {
-
-    console.error(
-      "Fatal startup error:",
-      err?.stack || err
-    );
-
-    process.exit(1);
-  }
+  loginDiscord("startup");
 }
 
-start();
+
+start().catch((err) => {
+
+  console.error(
+    "Fatal startup error:",
+    err?.stack || err
+  );
+
+  process.exit(1);
+});
