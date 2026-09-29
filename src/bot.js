@@ -44,7 +44,17 @@ for (const name of [
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds
-  ]
+  ],
+
+  ws: {
+    version: "10",
+    encoding: "json",
+    compression: null,
+
+    handshakeTimeout: 30000,
+    helloTimeout: 60000,
+    readyTimeout: 30000
+  }
 });
 
 let loginInProgress = false;
@@ -75,84 +85,59 @@ const pool = new Pool({
 
 
 // ============================================================
-// DISCORD EVENTS
+// DISCORD DEBUGGING
 // ============================================================
 
-client.once("ready", async () => {
-  console.log(
-    `Discord bot is READY as ${client.user.tag} (${client.user.id})`
-  );
+client.on("debug", (message) => {
+  let safeMessage =
+    String(message);
 
-  console.log(
-    `Connected to ${client.guilds.cache.size} guild(s).`
-  );
-
-  try {
-    const approvalChannel =
-      await client.channels
-        .fetch(
-          String(
-            process.env.APPROVAL_CHANNEL_ID
-          )
-        )
-        .catch((err) => {
-          console.error(
-            "Could not fetch APPROVAL_CHANNEL_ID:",
-            err?.message || err
-          );
-
-          return null;
-        });
-
-    const guild =
-      approvalChannel?.guild;
-
-    if (!guild) {
-      console.error(
-        "Could not find the guild containing APPROVAL_CHANNEL_ID."
+  // Never allow the actual bot token to appear in logs.
+  if (process.env.DISCORD_TOKEN) {
+    safeMessage =
+      safeMessage.replace(
+        new RegExp(
+          process.env.DISCORD_TOKEN.replace(
+            /[.*+?^${}()|[\]\\]/g,
+            "\\$&"
+          ),
+          "g"
+        ),
+        "[REDACTED_TOKEN]"
       );
-
-      return;
-    }
-
-    await guild.commands.set(
-      slashCommands
-    );
-
-    slashCommandsRegistered = true;
-
-    console.log(
-      `Registered ${slashCommands.length} slash commands in guild ${guild.id}`
-    );
-
-  } catch (err) {
-    console.error(
-      "Slash-command registration failed:",
-      err?.stack || err
-    );
   }
-});
 
+  // Also hide anything that looks like a full token.
+  safeMessage =
+    safeMessage.replace(
+      /([A-Za-z\d_-]{20,})\.[A-Za-z\d_-]{4,}\.[A-Za-z\d_-]{20,}/g,
+      "[REDACTED_TOKEN]"
+    );
 
-client.on("error", (err) => {
-  console.error(
-    "Discord client error:",
-    err?.stack || err
+  console.log(
+    `[discord.js DEBUG] ${safeMessage}`
   );
 });
 
 
 client.on("warn", (message) => {
   console.warn(
-    "Discord warning:",
-    message
+    `[discord.js WARN] ${message}`
+  );
+});
+
+
+client.on("error", (err) => {
+  console.error(
+    "[discord.js ERROR]",
+    err?.stack || err
   );
 });
 
 
 client.on("shardError", (err) => {
   console.error(
-    "Discord shard error:",
+    "[discord.js SHARD ERROR]",
     err?.stack || err
   );
 });
@@ -162,9 +147,9 @@ client.on(
   "shardDisconnect",
   (event, shardId) => {
     console.error(
-      `Discord shard ${shardId} disconnected:`,
+      `[discord.js] Shard ${shardId} disconnected:`,
       event?.code,
-      event?.reason || ""
+      event?.reason || "no reason"
     );
   }
 );
@@ -174,7 +159,7 @@ client.on(
   "shardReconnecting",
   (shardId) => {
     console.log(
-      `Discord shard ${shardId} is reconnecting...`
+      `[discord.js] Shard ${shardId} reconnecting...`
     );
   }
 );
@@ -184,10 +169,90 @@ client.on(
   "shardReady",
   (shardId) => {
     console.log(
-      `Discord shard ${shardId} is ready.`
+      `[discord.js] Shard ${shardId} ready.`
     );
   }
 );
+
+
+// ============================================================
+// DISCORD READY
+// ============================================================
+
+client.once("ready", async () => {
+
+  console.log(
+    "========================================"
+  );
+
+  console.log(
+    `Discord bot is READY as ${client.user.tag} (${client.user.id})`
+  );
+
+  console.log(
+    `Connected to ${client.guilds.cache.size} guild(s).`
+  );
+
+  console.log(
+    "========================================"
+  );
+
+
+  try {
+
+    const approvalChannel =
+      await client.channels
+        .fetch(
+          String(
+            process.env.APPROVAL_CHANNEL_ID
+          )
+        )
+        .catch((err) => {
+
+          console.error(
+            "Could not fetch APPROVAL_CHANNEL_ID:",
+            err?.message || err
+          );
+
+          return null;
+        });
+
+
+    const guild =
+      approvalChannel?.guild;
+
+
+    if (!guild) {
+
+      console.error(
+        "Could not find the guild containing APPROVAL_CHANNEL_ID."
+      );
+
+      return;
+    }
+
+
+    await guild.commands.set(
+      slashCommands
+    );
+
+
+    slashCommandsRegistered =
+      true;
+
+
+    console.log(
+      `Registered ${slashCommands.length} slash commands in guild ${guild.id}`
+    );
+
+  } catch (err) {
+
+    console.error(
+      "Slash-command registration failed:",
+      err?.stack || err
+    );
+  }
+});
 
 
 // ============================================================
@@ -195,6 +260,7 @@ client.on(
 // ============================================================
 
 async function initDb() {
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS hub_users (
       user_id TEXT PRIMARY KEY,
@@ -241,6 +307,7 @@ async function logNewHubUser(
   userId,
   username
 ) {
+
   const id =
     String(userId).trim();
 
@@ -248,6 +315,7 @@ async function logNewHubUser(
     String(
       username || "unknown"
     ).trim();
+
 
   const existing =
     await pool.query(
@@ -260,6 +328,7 @@ async function logNewHubUser(
       [id]
     );
 
+
   if (
     existing.rowCount &&
     existing.rows[0].logged_at
@@ -267,12 +336,15 @@ async function logNewHubUser(
     return false;
   }
 
+
   const channelId =
     String(
       process.env.ROBLOX_LOG_CHANNEL_ID || ""
     ).trim();
 
+
   if (!channelId) {
+
     console.error(
       "ROBLOX_LOG_CHANNEL_ID is not set; cannot log new Roblox users."
     );
@@ -280,10 +352,12 @@ async function logNewHubUser(
     return false;
   }
 
+
   const channel =
     await client.channels
       .fetch(channelId)
       .catch((err) => {
+
         console.error(
           "Could not fetch ROBLOX_LOG_CHANNEL_ID:",
           err?.message || err
@@ -292,10 +366,12 @@ async function logNewHubUser(
         return null;
       });
 
+
   if (
     !channel ||
     !channel.isTextBased()
   ) {
+
     console.error(
       "ROBLOX_LOG_CHANNEL_ID is not a text-based Discord channel."
     );
@@ -303,7 +379,9 @@ async function logNewHubUser(
     return false;
   }
 
+
   try {
+
     await channel.send({
       content:
         `Roblox Username: **${name}**\n` +
@@ -311,6 +389,7 @@ async function logNewHubUser(
     });
 
   } catch (err) {
+
     console.error(
       "Could not send new-user log:",
       err?.message || err
@@ -318,6 +397,7 @@ async function logNewHubUser(
 
     return false;
   }
+
 
   await pool.query(
     `
@@ -344,9 +424,11 @@ async function logNewHubUser(
     ]
   );
 
+
   console.log(
     `Logged new Roblox user ${name} (${id})`
   );
+
 
   return true;
 }
@@ -359,8 +441,10 @@ async function logNewHubUser(
 async function getPermanentStatus(
   userId
 ) {
+
   const id =
     String(userId);
+
 
   const black =
     await pool.query(
@@ -373,9 +457,11 @@ async function getPermanentStatus(
       [id]
     );
 
+
   if (black.rowCount) {
     return "blacklisted";
   }
+
 
   const white =
     await pool.query(
@@ -388,9 +474,11 @@ async function getPermanentStatus(
       [id]
     );
 
+
   if (white.rowCount) {
     return "whitelisted";
   }
+
 
   return "none";
 }
@@ -400,6 +488,7 @@ async function getSessionDecision(
   userId,
   sessionId
 ) {
+
   const result =
     await pool.query(
       `
@@ -415,9 +504,11 @@ async function getSessionDecision(
       ]
     );
 
+
   if (!result.rowCount) {
     return "none";
   }
+
 
   return result.rows[0].decision;
 }
@@ -429,6 +520,7 @@ async function setSessionDecision(
   sessionId,
   decision
 ) {
+
   await pool.query(
     `
     INSERT INTO access_sessions
@@ -472,6 +564,7 @@ async function addWhitelist(
   userId,
   username
 ) {
+
   await pool.query(
     `
     INSERT INTO permanent_whitelist
@@ -495,6 +588,7 @@ async function addWhitelist(
     ]
   );
 
+
   await pool.query(
     `
     DELETE FROM permanent_blacklist
@@ -509,6 +603,7 @@ async function addBlacklist(
   userId,
   username
 ) {
+
   await pool.query(
     `
     INSERT INTO permanent_blacklist
@@ -532,6 +627,7 @@ async function addBlacklist(
     ]
   );
 
+
   await pool.query(
     `
     DELETE FROM permanent_whitelist
@@ -539,6 +635,7 @@ async function addBlacklist(
     `,
     [String(userId)]
   );
+
 
   await pool.query(
     `
@@ -553,6 +650,7 @@ async function addBlacklist(
 async function removeWhitelist(
   userId
 ) {
+
   const result =
     await pool.query(
       `
@@ -562,6 +660,7 @@ async function removeWhitelist(
       [String(userId)]
     );
 
+
   return result.rowCount > 0;
 }
 
@@ -569,6 +668,7 @@ async function removeWhitelist(
 async function removeBlacklist(
   userId
 ) {
+
   const result =
     await pool.query(
       `
@@ -578,11 +678,13 @@ async function removeBlacklist(
       [String(userId)]
     );
 
+
   return result.rowCount > 0;
 }
 
 
 async function getLists() {
+
   const white =
     await pool.query(
       `
@@ -594,6 +696,7 @@ async function getLists() {
       ORDER BY approved_at DESC
       `
     );
+
 
   const black =
     await pool.query(
@@ -607,6 +710,7 @@ async function getLists() {
       `
     );
 
+
   return {
     whitelist: white.rows,
     blacklist: black.rows
@@ -619,8 +723,10 @@ async function getLists() {
 // ============================================================
 
 const slashCommands = [
+
   {
     name: "whitelist",
+
     description:
       "Permanently allow a user to open the hub",
 
@@ -632,6 +738,7 @@ const slashCommands = [
         type: 3,
         required: true
       },
+
       {
         name: "username",
         description:
@@ -642,8 +749,10 @@ const slashCommands = [
     ]
   },
 
+
   {
     name: "blacklist",
+
     description:
       "Permanently deny a user from opening the hub",
 
@@ -655,6 +764,7 @@ const slashCommands = [
         type: 3,
         required: true
       },
+
       {
         name: "username",
         description:
@@ -665,8 +775,10 @@ const slashCommands = [
     ]
   },
 
+
   {
     name: "unwhitelist",
+
     description:
       "Remove a user from the whitelist",
 
@@ -681,8 +793,10 @@ const slashCommands = [
     ]
   },
 
+
   {
     name: "unblacklist",
+
     description:
       "Remove a user from the blacklist",
 
@@ -697,21 +811,25 @@ const slashCommands = [
     ]
   },
 
+
   {
     name: "list",
+
     description:
       "Show current whitelist and blacklist"
   }
+
 ];
 
 
 // ============================================================
-// WEB SERVER
+// ROOT
 // ============================================================
 
 app.get(
   "/",
   (_req, res) => {
+
     res.status(200).send(
       client.isReady()
         ? "All-In-One Approver is online and connected to Discord."
@@ -729,7 +847,10 @@ app.get(
   "/wake",
   (_req, res) => {
 
-    if (client.isReady()) {
+    if (
+      client.isReady()
+    ) {
+
       return res.status(200).json({
         ok: true,
         connected: true,
@@ -738,7 +859,11 @@ app.get(
       });
     }
 
-    if (loginInProgress) {
+
+    if (
+      loginInProgress
+    ) {
+
       return res.status(202).json({
         ok: true,
         connected: false,
@@ -747,9 +872,11 @@ app.get(
       });
     }
 
+
     loginDiscord(
       "/wake"
     );
+
 
     return res.status(202).json({
       ok: true,
@@ -768,8 +895,11 @@ app.get(
 app.get(
   "/health",
   (_req, res) => {
+
     res.json({
+
       ok: true,
+
       discordConnected:
         client.isReady(),
 
@@ -791,46 +921,57 @@ app.get(
   async (req, res) => {
 
     try {
+
       const userId =
         String(
           req.query.userId || ""
         ).trim();
+
 
       const sessionId =
         String(
           req.query.sessionId || ""
         ).trim();
 
+
       const username =
         String(
           req.query.username || ""
         ).trim();
 
+
       if (!userId) {
+
         return res.status(400).json({
           error:
             "missing userId"
         });
       }
 
+
       await logNewHubUser(
         userId,
         username
       ).catch((err) => {
+
         console.error(
           "User logging error:",
           err?.message || err
         );
       });
 
+
       const status =
         await getPermanentStatus(
           userId
         );
 
+
       if (
-        status === "blacklisted"
+        status ===
+        "blacklisted"
       ) {
+
         return res.json({
           ok: true,
           approved: false,
@@ -839,9 +980,12 @@ app.get(
         });
       }
 
+
       if (
-        status === "whitelisted"
+        status ===
+        "whitelisted"
       ) {
+
         return res.json({
           ok: true,
           approved: true,
@@ -849,7 +993,9 @@ app.get(
         });
       }
 
+
       if (!sessionId) {
+
         return res.json({
           ok: true,
           approved: false,
@@ -857,30 +1003,38 @@ app.get(
         });
       }
 
+
       const decision =
         await getSessionDecision(
           userId,
           sessionId
         );
 
+
       if (
-        decision === "accepted"
+        decision ===
+        "accepted"
       ) {
+
         return res.json({
           ok: true,
           approved: true
         });
       }
 
+
       if (
-        decision === "denied"
+        decision ===
+        "denied"
       ) {
+
         return res.json({
           ok: true,
           approved: false,
           denied: true
         });
       }
+
 
       return res.json({
         ok: true,
@@ -889,10 +1043,12 @@ app.get(
       });
 
     } catch (err) {
+
       console.error(
         "check error:",
         err
       );
+
 
       return res.status(500).json({
         error:
@@ -912,6 +1068,7 @@ app.post(
   async (req, res) => {
 
     try {
+
       const {
         userId,
         username,
@@ -922,25 +1079,30 @@ app.post(
         jobId
       } = req.body || {};
 
+
       if (
         !userId ||
         !sessionId
       ) {
+
         return res.status(400).json({
           error:
             "userId and sessionId are required"
         });
       }
 
+
       const permanentStatus =
         await getPermanentStatus(
           userId
         );
 
+
       if (
         permanentStatus ===
         "blacklisted"
       ) {
+
         return res.json({
           ok: true,
           approved: false,
@@ -949,10 +1111,12 @@ app.post(
         });
       }
 
+
       if (
         permanentStatus ===
         "whitelisted"
       ) {
+
         return res.json({
           ok: true,
           approved: true,
@@ -960,24 +1124,31 @@ app.post(
         });
       }
 
+
       const decision =
         await getSessionDecision(
           userId,
           sessionId
         );
 
+
       if (
-        decision === "accepted"
+        decision ===
+        "accepted"
       ) {
+
         return res.json({
           ok: true,
           approved: true
         });
       }
 
+
       if (
-        decision === "denied"
+        decision ===
+        "denied"
       ) {
+
         return res.json({
           ok: true,
           approved: false,
@@ -985,74 +1156,99 @@ app.post(
         });
       }
 
+
       const embed =
         new EmbedBuilder()
           .setTitle(
             "Hub Access Request"
           )
+
           .setDescription(
             `**${displayName || username}** (\`${username}\`) wants to open the hub.`
           )
+
           .addFields(
+
             {
               name:
                 "Roblox User",
+
               value:
                 String(
                   username
                 ),
+
               inline: true
             },
+
             {
               name:
                 "UserId",
+
               value:
                 String(
                   userId
                 ),
+
               inline: true
             },
+
             {
               name:
                 "Place",
+
               value:
                 String(
                   place ||
                   "unknown"
                 ),
+
               inline: true
             },
+
             {
               name:
                 "Place ID",
+
               value:
                 String(
                   placeId ||
                   "unknown"
                 ),
+
               inline: true
             },
+
             {
               name:
                 "Session",
+
               value:
                 `\`${String(sessionId).slice(0, 24)}\``,
+
               inline: false
             },
+
             {
               name:
                 "Server",
+
               value:
                 jobId
                   ? `\`${jobId}\``
                   : "n/a",
+
               inline: false
             }
+
           )
+
           .setColor(
             0xff3333
           )
+
           .setTimestamp();
+
 
       const row =
         new ActionRowBuilder()
@@ -1062,46 +1258,59 @@ app.post(
               .setCustomId(
                 `accept:${userId}:${sessionId}:${username}`
               )
+
               .setLabel(
                 "Accept"
               )
+
               .setStyle(
                 ButtonStyle.Success
               ),
+
 
             new ButtonBuilder()
               .setCustomId(
                 `deny:${userId}:${sessionId}:${username}`
               )
+
               .setLabel(
                 "Deny"
               )
+
               .setStyle(
                 ButtonStyle.Danger
               ),
+
 
             new ButtonBuilder()
               .setCustomId(
                 `whitelist:${userId}:${sessionId}:${username}`
               )
+
               .setLabel(
                 "Whitelist"
               )
+
               .setStyle(
                 ButtonStyle.Primary
               ),
+
 
             new ButtonBuilder()
               .setCustomId(
                 `blacklist:${userId}:${sessionId}:${username}`
               )
+
               .setLabel(
                 "Blacklist"
               )
+
               .setStyle(
                 ButtonStyle.Secondary
               )
+
           );
+
 
       const owner =
         await client.users
@@ -1110,6 +1319,7 @@ app.post(
               process.env.OWNER_ID
             )
           )
+
           .catch((err) => {
 
             console.error(
@@ -1120,21 +1330,27 @@ app.post(
             return null;
           });
 
+
       if (!owner) {
+
         return res.status(500).json({
           error:
             "could not find OWNER_ID on Discord"
         });
       }
 
+
       try {
+
         const dm =
           await owner.createDM();
+
 
         await dm.send({
           embeds: [
             embed
           ],
+
           components: [
             row
           ]
@@ -1147,11 +1363,13 @@ app.post(
           dmErr?.message || dmErr
         );
 
+
         return res.status(500).json({
           error:
             "could not DM owner"
         });
       }
+
 
       return res.json({
         ok: true,
@@ -1164,6 +1382,7 @@ app.post(
         "request error:",
         err
       );
+
 
       return res.status(500).json({
         error:
@@ -1194,17 +1413,21 @@ client.on(
         interaction.user.id !==
         process.env.OWNER_ID
       ) {
+
         return interaction.reply({
           content:
             "Only the owner can use these commands.",
+
           ephemeral: true
         });
       }
+
 
       try {
 
         const command =
           interaction.commandName;
+
 
         const userId =
           interaction.options
@@ -1212,6 +1435,7 @@ client.on(
               "user_id"
             )
             ?.trim();
+
 
         const username =
           interaction.options
@@ -1221,12 +1445,12 @@ client.on(
             ?.trim() ||
           "unknown";
 
+
         await interaction.deferReply({
           ephemeral: true
         });
 
 
-        // /whitelist
         if (
           command ===
           "whitelist"
@@ -1237,15 +1461,18 @@ client.on(
               userId || ""
             )
           ) {
+
             return interaction.editReply(
               "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
+
           await addWhitelist(
             userId,
             username
           );
+
 
           return interaction.editReply(
             `✅ Permanently whitelisted \`${username}\` (UserId: \`${userId}\`).`
@@ -1253,7 +1480,6 @@ client.on(
         }
 
 
-        // /blacklist
         if (
           command ===
           "blacklist"
@@ -1264,15 +1490,18 @@ client.on(
               userId || ""
             )
           ) {
+
             return interaction.editReply(
               "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
+
           await addBlacklist(
             userId,
             username
           );
+
 
           return interaction.editReply(
             `⛔ Permanently blacklisted \`${username}\` (UserId: \`${userId}\`).`
@@ -1280,7 +1509,6 @@ client.on(
         }
 
 
-        // /unwhitelist
         if (
           command ===
           "unwhitelist"
@@ -1291,15 +1519,18 @@ client.on(
               userId || ""
             )
           ) {
+
             return interaction.editReply(
               "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
+
           const removed =
             await removeWhitelist(
               userId
             );
+
 
           return interaction.editReply(
             removed
@@ -1309,7 +1540,6 @@ client.on(
         }
 
 
-        // /unblacklist
         if (
           command ===
           "unblacklist"
@@ -1320,15 +1550,18 @@ client.on(
               userId || ""
             )
           ) {
+
             return interaction.editReply(
               "❌ Invalid Roblox UserId. Use the numeric UserId."
             );
           }
 
+
           const removed =
             await removeBlacklist(
               userId
             );
+
 
           return interaction.editReply(
             removed
@@ -1338,7 +1571,6 @@ client.on(
         }
 
 
-        // /list
         if (
           command ===
           "list"
@@ -1350,30 +1582,40 @@ client.on(
           } =
             await getLists();
 
+
           const format =
             (rows) => {
 
-              if (!rows.length) {
+              if (
+                !rows.length
+              ) {
                 return "None";
               }
+
 
               return rows
                 .map(
                   (r) =>
                     `\`${r.user_id}\` — ${r.username || "unknown"}`
                 )
-                .join("\n");
+                .join(
+                  "\n"
+                );
             };
+
 
           const embed =
             new EmbedBuilder()
               .setTitle(
                 "Current Access Lists"
               )
+
               .addFields(
+
                 {
                   name:
                     `✅ Whitelist (${whitelist.length})`,
+
                   value:
                     format(
                       whitelist
@@ -1381,11 +1623,14 @@ client.on(
                       0,
                       1024
                     ),
+
                   inline: false
                 },
+
                 {
                   name:
                     `⛔ Blacklist (${blacklist.length})`,
+
                   value:
                     format(
                       blacklist
@@ -1393,13 +1638,18 @@ client.on(
                       0,
                       1024
                     ),
+
                   inline: false
                 }
+
               )
+
               .setColor(
                 0x5865f2
               )
+
               .setTimestamp();
+
 
           return interaction.editReply({
             embeds: [
@@ -1420,14 +1670,17 @@ client.on(
           err
         );
 
+
         if (
           interaction.deferred ||
           interaction.replied
         ) {
+
           await interaction
             .editReply(
               "❌ Database error while running that command."
             )
+
             .catch(
               () => {}
             );
@@ -1438,13 +1691,16 @@ client.on(
             .reply({
               content:
                 "❌ Database error while running that command.",
+
               ephemeral: true
             })
+
             .catch(
               () => {}
             );
         }
       }
+
 
       return;
     }
@@ -1460,21 +1716,26 @@ client.on(
       return;
     }
 
+
     if (
       interaction.user.id !==
       process.env.OWNER_ID
     ) {
+
       return interaction.reply({
         content:
           "Only the owner can use these buttons.",
+
         ephemeral: true
       });
     }
+
 
     const parts =
       interaction.customId.split(
         ":"
       );
+
 
     const action =
       parts[0];
@@ -1494,7 +1755,6 @@ client.on(
 
     try {
 
-      // ACCEPT
       if (
         action ===
         "accept"
@@ -1507,19 +1767,22 @@ client.on(
           "accepted"
         );
 
+
         await interaction.update({
           content:
             `✅ **Accepted for this session only** — \`${username}\`\nThis does NOT whitelist them.`,
+
           embeds:
             interaction.message.embeds,
+
           components: []
         });
+
 
         return;
       }
 
 
-      // DENY
       if (
         action ===
         "deny"
@@ -1532,19 +1795,22 @@ client.on(
           "denied"
         );
 
+
         await interaction.update({
           content:
             `❌ **Denied** — \`${username}\`\nThis does NOT blacklist them.`,
+
           embeds:
             interaction.message.embeds,
+
           components: []
         });
+
 
         return;
       }
 
 
-      // WHITELIST
       if (
         action ===
         "whitelist"
@@ -1555,6 +1821,7 @@ client.on(
           username
         );
 
+
         await setSessionDecision(
           userId,
           username,
@@ -1562,19 +1829,22 @@ client.on(
           "accepted"
         );
 
+
         await interaction.update({
           content:
             `✅ **Whitelisted permanently** — \`${username}\``,
+
           embeds:
             interaction.message.embeds,
+
           components: []
         });
+
 
         return;
       }
 
 
-      // BLACKLIST
       if (
         action ===
         "blacklist"
@@ -1585,13 +1855,17 @@ client.on(
           username
         );
 
+
         await interaction.update({
           content:
             `⛔ **Blacklisted permanently** — \`${username}\``,
+
           embeds:
             interaction.message.embeds,
+
           components: []
         });
+
 
         return;
       }
@@ -1603,16 +1877,20 @@ client.on(
         err
       );
 
+
       if (
         !interaction.replied &&
         !interaction.deferred
       ) {
+
         await interaction
           .reply({
             content:
               "Database error while updating this request.",
+
             ephemeral: true
           })
+
           .catch(
             () => {}
           );
@@ -1631,6 +1909,7 @@ function testHttpsConnection(
   path = "/",
   timeoutMs = 10000
 ) {
+
   return new Promise(
     (resolve) => {
 
@@ -1640,14 +1919,17 @@ function testHttpsConnection(
             hostname,
             path,
             method: "GET",
+
             headers: {
               "User-Agent":
                 "All-In-One-Approver-Diagnostic"
             }
           },
+
           (response) => {
 
             response.resume();
+
 
             response.on(
               "end",
@@ -1663,9 +1945,11 @@ function testHttpsConnection(
           }
         );
 
+
       request.setTimeout(
         timeoutMs,
         () => {
+
           request.destroy(
             new Error(
               "HTTPS connection timed out"
@@ -1674,12 +1958,14 @@ function testHttpsConnection(
         }
       );
 
+
       request.on(
         "error",
         (err) => {
 
           resolve({
             ok: false,
+
             error:
               err?.message ||
               String(err),
@@ -1702,25 +1988,38 @@ function testHttpsConnection(
 function testGatewayTls(
   hostname =
     "gateway.discord.gg",
+
   port = 443,
+
   timeoutMs = 10000
 ) {
+
   return new Promise(
     (resolve) => {
 
-      let finished = false;
+      let finished =
+        false;
+
 
       const finish =
         (result) => {
 
-          if (finished) {
+          if (
+            finished
+          ) {
             return;
           }
 
-          finished = true;
 
-          resolve(result);
+          finished =
+            true;
+
+
+          resolve(
+            result
+          );
         };
+
 
       const socket =
         tls.connect({
@@ -1730,12 +2029,14 @@ function testGatewayTls(
           timeout: timeoutMs
         });
 
+
       socket.once(
         "secureConnect",
         () => {
 
           finish({
             ok: true,
+
             authorized:
               socket.authorized,
 
@@ -1744,9 +2045,11 @@ function testGatewayTls(
               null
           });
 
+
           socket.destroy();
         }
       );
+
 
       socket.once(
         "timeout",
@@ -1754,13 +2057,16 @@ function testGatewayTls(
 
           finish({
             ok: false,
+
             error:
               "TLS connection timed out"
           });
 
+
           socket.destroy();
         }
       );
+
 
       socket.once(
         "error",
@@ -1768,6 +2074,7 @@ function testGatewayTls(
 
           finish({
             ok: false,
+
             error:
               err?.message ||
               String(err),
@@ -1784,7 +2091,7 @@ function testGatewayTls(
 
 
 // ============================================================
-// NETWORK DIAGNOSTIC
+// DISCORD NETWORK DIAGNOSTIC
 // ============================================================
 
 async function diagnoseDiscordNetwork() {
@@ -1802,13 +2109,13 @@ async function diagnoseDiscordNetwork() {
   );
 
 
-  // DNS: discord.com
   try {
 
     const result =
       await dns.lookup(
         "discord.com"
       );
+
 
     console.log(
       `Discord DNS (discord.com): OK -> ${result.address}`
@@ -1823,13 +2130,13 @@ async function diagnoseDiscordNetwork() {
   }
 
 
-  // DNS: gateway.discord.gg
   try {
 
     const result =
       await dns.lookup(
         "gateway.discord.gg"
       );
+
 
     console.log(
       `Discord Gateway DNS (gateway.discord.gg): OK -> ${result.address}`
@@ -1844,13 +2151,13 @@ async function diagnoseDiscordNetwork() {
   }
 
 
-  // HTTPS
   const httpsResult =
     await testHttpsConnection(
       "discord.com",
       "/",
       10000
     );
+
 
   if (
     httpsResult.ok
@@ -1864,18 +2171,14 @@ async function diagnoseDiscordNetwork() {
 
     console.error(
       "Discord HTTPS (discord.com): FAILED ->",
-      httpsResult.error,
-
-      httpsResult.code
-        ? `(code: ${httpsResult.code})`
-        : ""
+      httpsResult.error
     );
   }
 
 
-  // TLS
   const tlsResult =
     await testGatewayTls();
+
 
   if (
     tlsResult.ok
@@ -1889,11 +2192,7 @@ async function diagnoseDiscordNetwork() {
 
     console.error(
       "Discord Gateway TLS (gateway.discord.gg:443): FAILED ->",
-      tlsResult.error,
-
-      tlsResult.code
-        ? `(code: ${tlsResult.code})`
-        : ""
+      tlsResult.error
     );
   }
 
@@ -1914,11 +2213,6 @@ async function diagnoseDiscordNetwork() {
 
 // ============================================================
 // RAW DISCORD WEBSOCKET DIAGNOSTIC
-//
-// IMPORTANT:
-// We intentionally keep socket data as raw Buffers.
-// Do NOT use socket.setEncoding("utf8") here.
-// WebSocket frames contain binary header bytes.
 // ============================================================
 
 function testDiscordWebSocket() {
@@ -1951,7 +2245,9 @@ function testDiscordWebSocket() {
       const key =
         crypto
           .randomBytes(16)
-          .toString("base64");
+          .toString(
+            "base64"
+          );
 
 
       let finished =
@@ -1970,21 +2266,34 @@ function testDiscordWebSocket() {
       const finish =
         (result) => {
 
-          if (finished) {
+          if (
+            finished
+          ) {
             return;
           }
 
-          finished = true;
 
-          if (timer) {
-            clearTimeout(timer);
+          finished =
+            true;
+
+
+          if (
+            timer
+          ) {
+            clearTimeout(
+              timer
+            );
           }
+
 
           try {
             socket.destroy();
           } catch {}
 
-          resolve(result);
+
+          resolve(
+            result
+          );
         };
 
 
@@ -2003,17 +2312,15 @@ function testDiscordWebSocket() {
 
             finish({
               ok: false,
+
               error:
                 "Raw WebSocket connection timed out after 15 seconds."
             });
 
           },
+
           15000
         );
-
-
-      // DO NOT CALL socket.setEncoding().
-      // We need the raw binary Buffer.
 
 
       socket.once(
@@ -2035,7 +2342,9 @@ function testDiscordWebSocket() {
             "User-Agent: all-in-one-approver-diagnostic",
             "",
             ""
-          ].join("\r\n");
+          ].join(
+            "\r\n"
+          );
 
 
           socket.write(
@@ -2049,11 +2358,15 @@ function testDiscordWebSocket() {
         "data",
         (chunk) => {
 
-          // Keep the data as raw bytes.
           const chunkBuffer =
-            Buffer.isBuffer(chunk)
+            Buffer.isBuffer(
+              chunk
+            )
               ? chunk
-              : Buffer.from(chunk);
+              : Buffer.from(
+                  chunk
+                );
+
 
           buffer =
             Buffer.concat([
@@ -2063,10 +2376,12 @@ function testDiscordWebSocket() {
 
 
           // --------------------------------------------------
-          // HTTP -> WebSocket upgrade
+          // HTTP UPGRADE
           // --------------------------------------------------
 
-          if (!upgraded) {
+          if (
+            !upgraded
+          ) {
 
             const headerEnd =
               buffer.indexOf(
@@ -2074,6 +2389,7 @@ function testDiscordWebSocket() {
                   "\r\n\r\n"
                 )
               );
+
 
             if (
               headerEnd === -1
@@ -2112,9 +2428,11 @@ function testDiscordWebSocket() {
 
               finish({
                 ok: false,
+
                 error:
                   `WebSocket upgrade failed: ${statusLine}`
               });
+
 
               return;
             }
@@ -2137,7 +2455,7 @@ function testDiscordWebSocket() {
 
 
           // --------------------------------------------------
-          // WebSocket frame parser
+          // WEBSOCKET FRAME PARSER
           // --------------------------------------------------
 
           while (
@@ -2155,6 +2473,7 @@ function testDiscordWebSocket() {
             const opcode =
               first & 0x0f;
 
+
             const masked =
               (second & 0x80) !== 0;
 
@@ -2162,11 +2481,11 @@ function testDiscordWebSocket() {
             let payloadLength =
               second & 0x7f;
 
+
             let offset =
               2;
 
 
-            // 126 = next 2 bytes contain length
             if (
               payloadLength === 126
             ) {
@@ -2177,17 +2496,18 @@ function testDiscordWebSocket() {
                 return;
               }
 
+
               payloadLength =
                 buffer.readUInt16BE(
                   2
                 );
+
 
               offset =
                 4;
             }
 
 
-            // 127 = next 8 bytes contain length
             else if (
               payloadLength === 127
             ) {
@@ -2204,6 +2524,7 @@ function testDiscordWebSocket() {
                   2
                 );
 
+
               const low =
                 buffer.readUInt32BE(
                   6
@@ -2216,9 +2537,11 @@ function testDiscordWebSocket() {
 
                 finish({
                   ok: false,
+
                   error:
                     "WebSocket frame is too large for this diagnostic."
                 });
+
 
                 return;
               }
@@ -2226,6 +2549,7 @@ function testDiscordWebSocket() {
 
               payloadLength =
                 low;
+
 
               offset =
                 10;
@@ -2256,6 +2580,9 @@ function testDiscordWebSocket() {
               offset;
 
 
+            let payload;
+
+
             if (
               masked
             ) {
@@ -2271,7 +2598,7 @@ function testDiscordWebSocket() {
                 4;
 
 
-              const payload =
+              payload =
                 Buffer.from(
                   buffer.subarray(
                     payloadStart,
@@ -2286,103 +2613,22 @@ function testDiscordWebSocket() {
                 i < payload.length;
                 i++
               ) {
+
                 payload[i] ^=
-                  mask[i % 4];
+                  mask[
+                    i % 4
+                  ];
               }
 
+            } else {
 
-              buffer =
+              payload =
                 buffer.subarray(
-                  totalLength
+                  payloadStart,
+                  payloadStart +
+                    payloadLength
                 );
-
-
-              if (
-                opcode === 0x8
-              ) {
-
-                finish({
-                  ok: false,
-                  error:
-                    "Discord closed the raw WebSocket before HELLO."
-                });
-
-                return;
-              }
-
-
-              if (
-                opcode === 0x9
-              ) {
-                continue;
-              }
-
-
-              if (
-                opcode !== 0x1
-              ) {
-                continue;
-              }
-
-
-              let packet;
-
-              try {
-
-                packet =
-                  JSON.parse(
-                    payload.toString(
-                      "utf8"
-                    )
-                  );
-
-              } catch (err) {
-
-                finish({
-                  ok: false,
-                  error:
-                    `Could not parse Gateway frame: ${err.message}`
-                });
-
-                return;
-              }
-
-
-              console.log(
-                `Discord raw WebSocket: RECEIVED OP ${packet.op}`
-              );
-
-
-              // Gateway HELLO = opcode 10
-              if (
-                packet.op === 10
-              ) {
-
-                console.log(
-                  "Discord raw WebSocket: HELLO RECEIVED"
-                );
-
-
-                finish({
-                  ok: true,
-                  hello: true
-                });
-
-                return;
-              }
-
-
-              continue;
             }
-
-
-            // Unmasked server frame
-            const payload =
-              buffer.subarray(
-                payloadStart,
-                payloadStart +
-                  payloadLength
-              );
 
 
             buffer =
@@ -2398,9 +2644,11 @@ function testDiscordWebSocket() {
 
               finish({
                 ok: false,
+
                 error:
                   "Discord closed the raw WebSocket before HELLO."
               });
+
 
               return;
             }
@@ -2410,14 +2658,11 @@ function testDiscordWebSocket() {
             if (
               opcode === 0x9
             ) {
-
-              // We don't need to respond to the ping
-              // for this short diagnostic.
               continue;
             }
 
 
-            // Only process text frames.
+            // Only text frames matter here.
             if (
               opcode !== 0x1
             ) {
@@ -2426,6 +2671,7 @@ function testDiscordWebSocket() {
 
 
             let packet;
+
 
             try {
 
@@ -2440,9 +2686,11 @@ function testDiscordWebSocket() {
 
               finish({
                 ok: false,
+
                 error:
                   `Could not parse Gateway frame: ${err.message}`
               });
+
 
               return;
             }
@@ -2453,7 +2701,7 @@ function testDiscordWebSocket() {
             );
 
 
-            // Discord Gateway HELLO
+            // Gateway HELLO
             if (
               packet.op === 10
             ) {
@@ -2467,6 +2715,7 @@ function testDiscordWebSocket() {
                 ok: true,
                 hello: true
               });
+
 
               return;
             }
@@ -2504,10 +2753,13 @@ function testDiscordWebSocket() {
         "close",
         () => {
 
-          if (!finished) {
+          if (
+            !finished
+          ) {
 
             finish({
               ok: false,
+
               error:
                 "Raw WebSocket closed before Discord Gateway HELLO."
             });
@@ -2572,23 +2824,74 @@ async function loginDiscord(
   );
 
 
+  console.log(
+    "discord.js version:",
+    require("discord.js").version ||
+      "unknown"
+  );
+
+
+  console.log(
+    "Discord WebSocket options:",
+    {
+      version:
+        client.options.ws?.version,
+
+      encoding:
+        client.options.ws?.encoding,
+
+      compression:
+        client.options.ws?.compression,
+
+      handshakeTimeout:
+        client.options.ws?.handshakeTimeout,
+
+      helloTimeout:
+        client.options.ws?.helloTimeout,
+
+      readyTimeout:
+        client.options.ws?.readyTimeout
+    }
+  );
+
+
   try {
 
+    const loginPromise =
+      client.login(
+        process.env.DISCORD_TOKEN
+      );
+
+
+    const timeoutPromise =
+      new Promise(
+        (_, reject) => {
+
+          setTimeout(
+            () => {
+
+              reject(
+                new Error(
+                  "discord.js login did not finish within 90 seconds."
+                )
+              );
+
+            },
+
+            90000
+          );
+        }
+      );
+
+
+    await Promise.race([
+      loginPromise,
+      timeoutPromise
+    ]);
+
+
     console.log(
-      `discord.js version: ${
-        require("discord.js").version ||
-        "unknown"
-      }`
-    );
-
-
-    await client.login(
-      process.env.DISCORD_TOKEN
-    );
-
-
-    console.log(
-      "Discord login call completed."
+      "Discord login promise completed."
     );
 
 
@@ -2597,8 +2900,9 @@ async function loginDiscord(
   } catch (err) {
 
     console.error(
-      "Discord login failed:"
+      "Discord login failed or timed out:"
     );
+
 
     console.error(
       err?.stack ||
@@ -2606,31 +2910,21 @@ async function loginDiscord(
     );
 
 
-    const status =
-      err?.status ??
-      err?.statusCode ??
-      err?.response?.status;
-
-    const code =
-      err?.code ??
-      err?.cause?.code;
+    console.error(
+      "Client ready state:",
+      client.isReady()
+    );
 
 
-    if (status) {
-      console.error(
-        `Discord/HTTP status: ${status}`
-      );
-    }
-
-
-    if (code) {
-      console.error(
-        `Error code: ${code}`
-      );
-    }
+    console.error(
+      "Discord user:",
+      client.user?.tag ||
+        "none"
+    );
 
 
     try {
+
       await client.destroy();
 
       console.log(
@@ -2642,7 +2936,7 @@ async function loginDiscord(
       console.error(
         "Error destroying Discord connection:",
         destroyErr?.message ||
-        destroyErr
+          destroyErr
       );
     }
 
@@ -2721,7 +3015,7 @@ async function start() {
 
 
 // ============================================================
-// START APPLICATION
+// START
 // ============================================================
 
 start().catch(
@@ -2730,8 +3024,9 @@ start().catch(
     console.error(
       "Fatal startup error:",
       err?.stack ||
-      err
+        err
     );
+
 
     process.exit(1);
   }
