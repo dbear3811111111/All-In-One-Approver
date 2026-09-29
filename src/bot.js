@@ -177,6 +177,7 @@ async function logNewHubUser(userId, username) {
   const id = String(userId).trim();
   const name = String(username || "unknown").trim();
 
+  // If this user was already successfully logged, do nothing.
   const existing = await pool.query(
     "SELECT logged_at FROM hub_users WHERE user_id = $1 LIMIT 1",
     [id]
@@ -238,6 +239,7 @@ async function logNewHubUser(userId, username) {
     return false;
   }
 
+  // Only mark the user as logged AFTER Discord accepted the message.
   await pool.query(
     `INSERT INTO hub_users
       (user_id, username, logged_at)
@@ -319,7 +321,7 @@ async function setSessionDecision(
       user_id = EXCLUDED.user_id,
       username = EXCLUDED.username,
       decision = EXCLUDED.decision,
-      decided_at = EXCLUDED.decided_at`,
+      decided_at = NOW()`,
     [
       String(sessionId),
       String(userId),
@@ -498,6 +500,11 @@ app.get("/", (_req, res) => {
   );
 });
 
+/*
+ * /wake now ONLY reports the Discord status.
+ *
+ * It does NOT trigger another Discord login attempt.
+ */
 app.get("/wake", (_req, res) => {
   const connected = client.isReady();
 
@@ -572,13 +579,13 @@ app.get("/check", async (req, res) => {
       });
     }
 
-    return res.json({
+    res.json({
       approved: false
     });
   } catch (err) {
     console.error("check error:", err);
 
-    return res.status(500).json({
+    res.status(500).json({
       approved: false
     });
   }
@@ -606,13 +613,10 @@ app.post("/request", async (req, res) => {
       });
     }
 
-    await logNewHubUser(
-      userId,
-      username
-    );
+    // Record every Roblox account the first time it requests hub access.
+    await logNewHubUser(userId, username);
 
-    const permanent =
-      await getPermanentStatus(userId);
+    const permanent = await getPermanentStatus(userId);
 
     if (permanent === "blacklisted") {
       return res.json({
@@ -630,11 +634,10 @@ app.post("/request", async (req, res) => {
       });
     }
 
-    const decision =
-      await getSessionDecision(
-        userId,
-        sessionId
-      );
+    const decision = await getSessionDecision(
+      userId,
+      sessionId
+    );
 
     if (decision === "accepted") {
       return res.json({
@@ -724,9 +727,7 @@ app.post("/request", async (req, res) => {
     );
 
     const owner = await client.users
-      .fetch(
-        String(process.env.OWNER_ID)
-      )
+      .fetch(String(process.env.OWNER_ID))
       .catch((err) => {
         console.error(
           "Could not fetch OWNER_ID:",
@@ -761,18 +762,14 @@ app.post("/request", async (req, res) => {
       });
     }
 
-    return res.json({
+    res.json({
       ok: true,
       approved: false
     });
-
   } catch (err) {
-    console.error(
-      "request error:",
-      err
-    );
+    console.error("request error:", err);
 
-    return res.status(500).json({
+    res.status(500).json({
       error: "request failed"
     });
   }
@@ -782,378 +779,341 @@ app.post("/request", async (req, res) => {
    DISCORD INTERACTIONS
    ========================================================= */
 
-client.on(
-  "interactionCreate",
-  async (interaction) => {
+client.on("interactionCreate", async (interaction) => {
 
-    /* -----------------------------------------------------
-       COPY USER ID BUTTON
-       ----------------------------------------------------- */
+  /* -------------------------------------------------------
+     COPY USER ID BUTTON
+     ------------------------------------------------------- */
 
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("copyid:")
-    ) {
-      if (
-        interaction.user.id !==
-        process.env.OWNER_ID
-      ) {
-        return interaction.reply({
-          content:
-            "Only the owner can use this button.",
-          ephemeral: true
-        });
-      }
-
-      const userId =
-        interaction.customId.slice(
-          "copyid:".length
-        );
-
-      if (!/^\d+$/.test(userId)) {
-        return interaction.reply({
-          content:
-            "❌ Invalid Roblox UserId.",
-          ephemeral: true
-        });
-      }
-
+  if (
+    interaction.isButton() &&
+    interaction.customId.startsWith("copyid:")
+  ) {
+    if (interaction.user.id !== process.env.OWNER_ID) {
       return interaction.reply({
-        content:
-          `📋 **Roblox UserId**\n` +
-          `\`\`\`text\n${userId}\n\`\`\`\n` +
-          `Use Discord's copy button on the code block to copy it.`,
+        content: "Only the owner can use this button.",
         ephemeral: true
       });
     }
 
-    /* -----------------------------------------------------
-       SLASH COMMANDS
-       ----------------------------------------------------- */
+    const userId = interaction.customId.slice(
+      "copyid:".length
+    );
 
-    if (
-      interaction.isChatInputCommand()
-    ) {
-      if (
-        interaction.user.id !==
-        process.env.OWNER_ID
-      ) {
-        return interaction.reply({
-          content:
-            "Only the owner can use these commands.",
-          ephemeral: true
-        });
-      }
-
-      try {
-        const command =
-          interaction.commandName;
-
-        const userId =
-          interaction.options
-            .getString("user_id")
-            ?.trim();
-
-        const username =
-          interaction.options
-            .getString("username")
-            ?.trim() ||
-          "unknown";
-
-        await interaction.deferReply({
-          ephemeral: true
-        });
-
-        if (command === "whitelist") {
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
-
-          await addWhitelist(
-            userId,
-            username
-          );
-
-          return interaction.editReply(
-            `✅ Permanently whitelisted \`${username}\` ` +
-            `(UserId: \`${userId}\`).`
-          );
-        }
-
-        if (command === "blacklist") {
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
-
-          await addBlacklist(
-            userId,
-            username
-          );
-
-          return interaction.editReply(
-            `⛔ Permanently blacklisted \`${username}\` ` +
-            `(UserId: \`${userId}\`).`
-          );
-        }
-
-        if (command === "unwhitelist") {
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
-
-          const removed =
-            await removeWhitelist(
-              userId
-            );
-
-          return interaction.editReply(
-            removed
-              ? `✅ Removed UserId \`${userId}\` from the permanent whitelist.`
-              : `ℹ️ UserId \`${userId}\` was not on the permanent whitelist.`
-          );
-        }
-
-        if (command === "unblacklist") {
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
-
-          const removed =
-            await removeBlacklist(
-              userId
-            );
-
-          return interaction.editReply(
-            removed
-              ? `✅ Removed UserId \`${userId}\` from the permanent blacklist.`
-              : `ℹ️ UserId \`${userId}\` was not on the permanent blacklist.`
-          );
-        }
-
-        if (command === "list") {
-          const {
-            whitelist,
-            blacklist
-          } = await getLists();
-
-          const format = (rows) =>
-            rows.length
-              ? rows
-                  .map(
-                    (r) =>
-                      `\`${r.user_id}\` — ${r.username || "unknown"}`
-                  )
-                  .join("\n")
-              : "None";
-
-          const embed =
-            new EmbedBuilder()
-              .setTitle(
-                "Current Access Lists"
-              )
-              .addFields(
-                {
-                  name:
-                    `✅ Whitelist (${whitelist.length})`,
-                  value:
-                    format(
-                      whitelist
-                    ).slice(0, 1024),
-                  inline: false
-                },
-                {
-                  name:
-                    `⛔ Blacklist (${blacklist.length})`,
-                  value:
-                    format(
-                      blacklist
-                    ).slice(0, 1024),
-                  inline: false
-                }
-              )
-              .setColor(0x5865f2)
-              .setTimestamp();
-
-          return interaction.editReply({
-            embeds: [embed]
-          });
-        }
-
-        return interaction.editReply(
-          "Unknown command."
-        );
-
-      } catch (err) {
-        console.error(
-          "slash command error:",
-          err
-        );
-
-        if (
-          interaction.deferred ||
-          interaction.replied
-        ) {
-          await interaction
-            .editReply(
-              "❌ Database error while running that command."
-            )
-            .catch(() => {});
-        } else {
-          await interaction
-            .reply({
-              content:
-                "❌ Database error while running that command.",
-              ephemeral: true
-            })
-            .catch(() => {});
-        }
-      }
-
-      return;
-    }
-
-    /* -----------------------------------------------------
-       BUTTON ACTIONS
-       ----------------------------------------------------- */
-
-    if (!interaction.isButton()) {
-      return;
-    }
-
-    if (
-      interaction.user.id !==
-      process.env.OWNER_ID
-    ) {
+    if (!/^\d+$/.test(userId)) {
       return interaction.reply({
-        content:
-          "Only the owner can use these buttons.",
+        content: "❌ Invalid Roblox UserId.",
         ephemeral: true
       });
     }
 
-    const parts =
-      interaction.customId.split(":");
+    return interaction.reply({
+      content:
+        `📋 **Roblox UserId**\n` +
+        `\`\`\`text\n${userId}\n\`\`\`\n` +
+        `Use Discord's copy button on the code block to copy it.`,
+      ephemeral: true
+    });
+  }
 
-    const action = parts[0];
-    const userId = parts[1];
-    const sessionId = parts[2];
+  /* -------------------------------------------------------
+     SLASH COMMANDS
+     ------------------------------------------------------- */
 
-    const username =
-      parts.slice(3).join(":") ||
-      "unknown";
+  if (interaction.isChatInputCommand()) {
+    if (interaction.user.id !== process.env.OWNER_ID) {
+      return interaction.reply({
+        content: "Only the owner can use these commands.",
+        ephemeral: true
+      });
+    }
 
     try {
+      const command = interaction.commandName;
 
-      if (action === "accept") {
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "accepted"
-        );
+      const userId = interaction.options
+        .getString("user_id")
+        ?.trim();
 
-        await interaction.update({
-          content:
-            `✅ **Accepted for this session only** — \`${username}\`\n` +
-            `This does NOT whitelist them.`,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
+      const username =
+        interaction.options
+          .getString("username")
+          ?.trim() || "unknown";
 
-        return;
-      }
+      await interaction.deferReply({
+        ephemeral: true
+      });
 
-      if (action === "deny") {
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "denied"
-        );
+      if (command === "whitelist") {
+        if (!/^\d+$/.test(userId || "")) {
+          return interaction.editReply(
+            "❌ Invalid Roblox UserId. Use the numeric UserId."
+          );
+        }
 
-        await interaction.update({
-          content:
-            `❌ **Denied** — \`${username}\`\n` +
-            `This does NOT blacklist them.`,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
-      }
-
-      if (action === "whitelist") {
         await addWhitelist(
           userId,
           username
         );
 
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "accepted"
+        return interaction.editReply(
+          `✅ Permanently whitelisted \`${username}\` ` +
+          `(UserId: \`${userId}\`).`
         );
-
-        await interaction.update({
-          content:
-            `✅ **Whitelisted permanently** — \`${username}\``,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
       }
 
-      if (action === "blacklist") {
+      if (command === "blacklist") {
+        if (!/^\d+$/.test(userId || "")) {
+          return interaction.editReply(
+            "❌ Invalid Roblox UserId. Use the numeric UserId."
+          );
+        }
+
         await addBlacklist(
           userId,
           username
         );
 
-        await interaction.update({
-          content:
-            `⛔ **Blacklisted permanently** — \`${username}\``,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
+        return interaction.editReply(
+          `⛔ Permanently blacklisted \`${username}\` ` +
+          `(UserId: \`${userId}\`).`
+        );
       }
+
+      if (command === "unwhitelist") {
+        if (!/^\d+$/.test(userId || "")) {
+          return interaction.editReply(
+            "❌ Invalid Roblox UserId. Use the numeric UserId."
+          );
+        }
+
+        const removed =
+          await removeWhitelist(userId);
+
+        return interaction.editReply(
+          removed
+            ? `✅ Removed UserId \`${userId}\` from the permanent whitelist.`
+            : `ℹ️ UserId \`${userId}\` was not on the permanent whitelist.`
+        );
+      }
+
+      if (command === "unblacklist") {
+        if (!/^\d+$/.test(userId || "")) {
+          return interaction.editReply(
+            "❌ Invalid Roblox UserId. Use the numeric UserId."
+          );
+        }
+
+        const removed =
+          await removeBlacklist(userId);
+
+        return interaction.editReply(
+          removed
+            ? `✅ Removed UserId \`${userId}\` from the permanent blacklist.`
+            : `ℹ️ UserId \`${userId}\` was not on the permanent blacklist.`
+        );
+      }
+
+      if (command === "list") {
+        const {
+          whitelist,
+          blacklist
+        } = await getLists();
+
+        const format = (rows) =>
+          rows.length
+            ? rows
+                .map(
+                  (r) =>
+                    `\`${r.user_id}\` — ${r.username || "unknown"}`
+                )
+                .join("\n")
+            : "None";
+
+        const embed = new EmbedBuilder()
+          .setTitle("Current Access Lists")
+          .addFields(
+            {
+              name: `✅ Whitelist (${whitelist.length})`,
+              value: format(whitelist).slice(0, 1024),
+              inline: false
+            },
+            {
+              name: `⛔ Blacklist (${blacklist.length})`,
+              value: format(blacklist).slice(0, 1024),
+              inline: false
+            }
+          )
+          .setColor(0x5865f2)
+          .setTimestamp();
+
+        return interaction.editReply({
+          embeds: [embed]
+        });
+      }
+
+      return interaction.editReply(
+        "Unknown command."
+      );
 
     } catch (err) {
       console.error(
-        "interaction error:",
+        "slash command error:",
         err
       );
 
       if (
-        !interaction.replied &&
-        !interaction.deferred
+        interaction.deferred ||
+        interaction.replied
       ) {
+        await interaction
+          .editReply(
+            "❌ Database error while running that command."
+          )
+          .catch(() => {});
+      } else {
         await interaction
           .reply({
             content:
-              "Database error while updating this request.",
+              "❌ Database error while running that command.",
             ephemeral: true
           })
           .catch(() => {});
       }
     }
+
+    return;
   }
-);
+
+  /* -------------------------------------------------------
+     BUTTON ACTIONS
+     ------------------------------------------------------- */
+
+  if (!interaction.isButton()) {
+    return;
+  }
+
+  if (interaction.user.id !== process.env.OWNER_ID) {
+    return interaction.reply({
+      content: "Only the owner can use these buttons.",
+      ephemeral: true
+    });
+  }
+
+  const parts =
+    interaction.customId.split(":");
+
+  const action = parts[0];
+  const userId = parts[1];
+  const sessionId = parts[2];
+
+  const username =
+    parts.slice(3).join(":") ||
+    "unknown";
+
+  try {
+
+    if (action === "accept") {
+      await setSessionDecision(
+        userId,
+        username,
+        sessionId,
+        "accepted"
+      );
+
+      await interaction.update({
+        content:
+          `✅ **Accepted for this session only** — \`${username}\`\n` +
+          `This does NOT whitelist them.`,
+        embeds:
+          interaction.message.embeds,
+        components: []
+      });
+
+      return;
+    }
+
+    if (action === "deny") {
+      await setSessionDecision(
+        userId,
+        username,
+        sessionId,
+        "denied"
+      );
+
+      await interaction.update({
+        content:
+          `❌ **Denied** — \`${username}\`\n` +
+          `This does NOT blacklist them.`,
+        embeds:
+          interaction.message.embeds,
+        components: []
+      });
+
+      return;
+    }
+
+    if (action === "whitelist") {
+      await addWhitelist(
+        userId,
+        username
+      );
+
+      await setSessionDecision(
+        userId,
+        username,
+        sessionId,
+        "accepted"
+      );
+
+      await interaction.update({
+        content:
+          `✅ **Whitelisted permanently** — \`${username}\``,
+        embeds:
+          interaction.message.embeds,
+        components: []
+      });
+
+      return;
+    }
+
+    if (action === "blacklist") {
+      await addBlacklist(
+        userId,
+        username
+      );
+
+      await interaction.update({
+        content:
+          `⛔ **Blacklisted permanently** — \`${username}\``,
+        embeds:
+          interaction.message.embeds,
+        components: []
+      });
+
+      return;
+    }
+
+  } catch (err) {
+    console.error(
+      "interaction error:",
+      err
+    );
+
+    if (
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
+      await interaction
+        .reply({
+          content:
+            "Database error while updating this request.",
+          ephemeral: true
+        })
+        .catch(() => {});
+    }
+  }
+});
 
 /* =========================================================
    DISCORD LOGIN / RETRY
@@ -1162,9 +1122,7 @@ client.on(
 let retryTimer = null;
 let retryAttempt = 0;
 
-async function loginDiscord(
-  reason = "startup"
-) {
+async function loginDiscord(reason = "startup") {
   if (
     client.isReady() ||
     loginInProgress
@@ -1180,36 +1138,17 @@ async function loginDiscord(
 
   try {
     /*
-     * Do NOT manually request:
+     * IMPORTANT:
      *
+     * Do NOT manually request:
      * https://discord.com/api/v10/gateway
      *
-     * discord.js handles the Gateway connection.
+     * discord.js handles the Gateway connection itself.
      */
 
-    const loginPromise =
-      client.login(
-        process.env.DISCORD_TOKEN
-      );
-
-    /*
-     * Prevent client.login() from hanging forever
-     * if the Discord Gateway cannot be reached.
-     */
-
-    await Promise.race([
-      loginPromise,
-
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(
-            new Error(
-              "Discord login attempt exceeded 30 seconds."
-            )
-          );
-        }, 30000);
-      })
-    ]);
+    await client.login(
+      process.env.DISCORD_TOKEN
+    );
 
     retryAttempt = 0;
 
@@ -1251,7 +1190,6 @@ async function loginDiscord(
      * Reset the client so the next attempt
      * starts a fresh Gateway connection.
      */
-
     try {
       client.destroy();
     } catch {}
@@ -1282,6 +1220,9 @@ function scheduleDiscordRetry() {
    * Attempt 4 = 8 minutes
    * Attempt 5 = 16 minutes
    * Attempt 6+ = 15 minutes
+   *
+   * This prevents the bot from repeatedly
+   * hammering Discord while rate-limited.
    */
 
   const delay = Math.min(
@@ -1311,7 +1252,7 @@ function scheduleDiscordRetry() {
 }
 
 /* =========================================================
-   START
+   START SERVER
    ========================================================= */
 
 async function start() {
@@ -1333,10 +1274,10 @@ async function start() {
 
   /*
    * Start Discord in the background.
-   * The HTTP server remains available even
-   * if Discord temporarily refuses the connection.
+   *
+   * The HTTP server remains available even if
+   * Discord temporarily refuses the connection.
    */
-
   loginDiscord("startup");
 }
 
