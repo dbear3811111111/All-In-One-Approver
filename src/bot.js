@@ -1,19 +1,7 @@
 require("dotenv").config();
 
-const {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle
-} = require("discord.js");
-
 const express = require("express");
 const { Pool } = require("pg");
-const tls = require("tls");
-const crypto = require("crypto");
-const dns = require("dns").promises;
 
 for (const name of [
   "DISCORD_TOKEN",
@@ -27,201 +15,222 @@ for (const name of [
   }
 }
 
+const TOKEN = process.env.DISCORD_TOKEN.trim();
 
-// ============================================================
-// DISCORD CLIENT
-// ============================================================
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds
-  ],
-
-  ws: {
-    version: "10",
-    encoding: "json",
-    compression: null,
-
-    // More generous diagnostics/timeouts.
-    handshakeTimeout: 30000,
-    helloTimeout: 60000,
-    readyTimeout: 30000
-  }
-});
-
-let loginInProgress = false;
-let slashCommandsRegistered = false;
-
-
-// ============================================================
-// DISCORD DEBUGGING
-// ============================================================
-
-function redactSecrets(message) {
-  let text = String(message);
-
-  if (process.env.DISCORD_TOKEN) {
-    const escaped = process.env.DISCORD_TOKEN.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&"
-    );
-
-    text = text.replace(
-      new RegExp(escaped, "g"),
-      "[REDACTED_TOKEN]"
-    );
-  }
-
-  // Generic Discord token-looking pattern.
-  text = text.replace(
-    /([A-Za-z\d_-]{20,})\.[A-Za-z\d_-]{4,}\.[A-Za-z\d_-]{20,}/g,
-    "[REDACTED_TOKEN]"
-  );
-
-  return text;
-}
-
-
-// Discord.js internal debug output.
-client.on("debug", (message) => {
-  console.log(
-    `[discord.js DEBUG] ${redactSecrets(message)}`
-  );
-});
-
-
-// General client error.
-client.on("error", (err) => {
-  console.error(
-    "Discord client error:",
-    err?.stack || err
-  );
-});
-
-
-// Shard errors.
-client.on("shardError", (err, shardId) => {
-  console.error(
-    `Discord shard ${shardId} error:`,
-    err?.stack || err
-  );
-});
-
-
-// Shard disconnect.
-client.on("shardDisconnect", (event, shardId) => {
-  console.error(
-    `Discord shard ${shardId} disconnected.`
-  );
-
-  console.error(
-    "Close code:",
-    event?.code
-  );
-
-  console.error(
-    "Close reason:",
-    event?.reason || "(none)"
-  );
-});
-
-
-// Shard reconnecting.
-client.on("shardReconnecting", (shardId) => {
-  console.log(
-    `Discord shard ${shardId} is reconnecting...`
-  );
-});
-
-
-// Shard ready.
-client.on("shardReady", (shardId) => {
-  console.log(
-    `Discord shard ${shardId} is ready.`
-  );
-});
-
-
-// ============================================================
-// EXPRESS
-// ============================================================
+const API_BASE = "https://discord.com/api/v10";
+const GATEWAY_URL =
+  "wss://gateway.discord.gg/?v=10&encoding=json";
 
 const app = express();
-
 app.use(express.json());
-
-
-// ============================================================
-// DATABASE
-// ============================================================
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-
-  ssl: {
-    rejectUnauthorized: false
-  }
+  ssl: { rejectUnauthorized: false }
 });
 
+let discordSocket = null;
+let discordUser = null;
+let discordReady = false;
+let slashCommandsRegistered = false;
 
-// ============================================================
-// DISCORD READY
-// ============================================================
+let loginInProgress = false;
+let gatewayConnecting = false;
 
-client.once("ready", async () => {
-  console.log("");
-  console.log("========================================");
-  console.log("DISCORD READY");
-  console.log("========================================");
+let reconnectTimer = null;
+let heartbeatTimer = null;
+let heartbeatAcked = true;
 
-  console.log(
-    `Discord bot is READY as ${client.user.tag} (${client.user.id})`
+let reconnectAttempt = 0;
+
+let gatewaySessionId = null;
+let gatewayResumeUrl = null;
+let gatewaySequence = null;
+
+const slashCommands = [
+  {
+    name: "whitelist",
+    description: "Permanently allow a user to open the hub",
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      },
+      {
+        name: "username",
+        description: "Roblox username (optional)",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+  {
+    name: "blacklist",
+    description: "Permanently deny a user from opening the hub",
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      },
+      {
+        name: "username",
+        description: "Roblox username (optional)",
+        type: 3,
+        required: false
+      }
+    ]
+  },
+  {
+    name: "unwhitelist",
+    description: "Remove a user from the whitelist",
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+  {
+    name: "unblacklist",
+    description: "Remove a user from the blacklist",
+    options: [
+      {
+        name: "user_id",
+        description: "Roblox UserId",
+        type: 3,
+        required: true
+      }
+    ]
+  },
+  {
+    name: "list",
+    description: "Show current whitelist and blacklist"
+  }
+];
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isDiscordConnected() {
+  return (
+    discordReady &&
+    discordSocket &&
+    discordSocket.readyState === WebSocket.OPEN
   );
+}
 
+function logDiscordState() {
   console.log(
-    `Connected to ${client.guilds.cache.size} guild(s).`
+    `Discord state: ready=${discordReady}, ` +
+    `socket=${discordSocket ? discordSocket.readyState : "none"}, ` +
+    `user=${discordUser?.username || "none"}, ` +
+    `session=${gatewaySessionId ? "yes" : "no"}`
   );
+}
 
-  try {
-    const approvalChannel = await client.channels
-      .fetch(String(process.env.APPROVAL_CHANNEL_ID))
-      .catch((err) => {
-        console.error(
-          "Could not fetch APPROVAL_CHANNEL_ID:",
-          err?.message || err
-        );
+function safeTokenPreview() {
+  if (!TOKEN) return "missing";
 
-        return null;
-      });
+  if (TOKEN.length < 12) {
+    return `${TOKEN.slice(0, 3)}***`;
+  }
 
-    const guild = approvalChannel?.guild;
+  return `${TOKEN.slice(0, 10)}...${TOKEN.slice(-4)}`;
+}
 
-    if (guild) {
-      await guild.commands.set(slashCommands);
+async function discordFetch(path, options = {}, attempt = 0) {
+  const headers = {
+    Authorization: `Bot ${TOKEN}`,
+    "User-Agent": "All-In-One-Approver/1.0",
 
-      slashCommandsRegistered = true;
+    ...(options.body !== undefined
+      ? { "Content-Type": "application/json" }
+      : {}),
 
-      console.log(
-        `Registered ${slashCommands.length} slash commands in guild ${guild.id}`
+    ...(options.headers || {})
+  };
+
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    signal:
+      options.signal ||
+      AbortSignal.timeout(15000)
+  });
+
+  if (response.status === 429 && attempt < 3) {
+    let retryMs = 1000;
+
+    try {
+      const data = await response.clone().json();
+
+      retryMs = Math.max(
+        250,
+        Number(data.retry_after || 1) * 1000
       );
-    } else {
-      console.error(
-        "Could not find APPROVAL_CHANNEL_ID guild; slash commands were not registered."
-      );
-    }
+    } catch {}
 
-  } catch (err) {
-    console.error(
-      "Slash-command registration failed:",
-      err?.stack || err
+    console.warn(
+      `Discord REST rate limited; retrying in ${Math.ceil(
+        retryMs
+      )}ms.`
+    );
+
+    await sleep(retryMs);
+
+    return discordFetch(
+      path,
+      options,
+      attempt + 1
     );
   }
-});
 
+  return response;
+}
 
-// ============================================================
-// DATABASE INITIALIZATION
-// ============================================================
+async function discordJson(path, options = {}) {
+  const response = await discordFetch(path, options);
+
+  const text = await response.text();
+
+  let data = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = text;
+    }
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof data === "string"
+        ? data
+        : JSON.stringify(data);
+
+    const error = new Error(
+      `Discord API ${response.status}: ${detail.slice(
+        0,
+        1000
+      )}`
+    );
+
+    error.status = response.status;
+    error.discordData = data;
+
+    throw error;
+  }
+
+  return data;
+}
 
 async function initDb() {
   await pool.query(`
@@ -233,7 +242,7 @@ async function initDb() {
     );
 
     ALTER TABLE hub_users
-    ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ;
+      ADD COLUMN IF NOT EXISTS logged_at TIMESTAMPTZ;
 
     CREATE TABLE IF NOT EXISTS permanent_whitelist (
       user_id TEXT PRIMARY KEY,
@@ -259,17 +268,17 @@ async function initDb() {
   console.log("Database initialized.");
 }
 
-
-// ============================================================
-// LOG NEW ROBLOX USER
-// ============================================================
-
 async function logNewHubUser(userId, username) {
   const id = String(userId).trim();
   const name = String(username || "unknown").trim();
 
   const existing = await pool.query(
-    "SELECT logged_at FROM hub_users WHERE user_id = $1 LIMIT 1",
+    `
+    SELECT logged_at
+    FROM hub_users
+    WHERE user_id = $1
+    LIMIT 1
+    `,
     [id]
   );
 
@@ -292,45 +301,23 @@ async function logNewHubUser(userId, username) {
     return false;
   }
 
-  const channel = await client.channels
-    .fetch(channelId)
-    .catch((err) => {
-      console.error(
-        "Could not fetch ROBLOX_LOG_CHANNEL_ID:",
-        err?.message || err
-      );
-
-      return null;
-    });
-
-  if (!channel || !channel.isTextBased()) {
-    console.error(
-      "ROBLOX_LOG_CHANNEL_ID is not a text-based Discord channel."
-    );
-
-    return false;
-  }
-
-  const logRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId(`copyid:${id}`)
-      .setLabel("Copy User ID")
-      .setEmoji("📋")
-      .setStyle(ButtonStyle.Secondary)
-  );
-
   try {
-    await channel.send({
-      content:
-        `Roblox Username: **${name}**\n` +
-        `User ID: \`${id}\``,
-      components: [logRow]
-    });
+    await discordJson(
+      `/channels/${channelId}/messages`,
+      {
+        method: "POST",
 
-  } catch (err) {
+        body: JSON.stringify({
+          content:
+            `Roblox Username: **${name}**\n` +
+            `User ID: \`${id}\``
+        })
+      }
+    );
+  } catch (error) {
     console.error(
       "Could not send new-user log:",
-      err?.message || err
+      error?.message || error
     );
 
     return false;
@@ -342,6 +329,7 @@ async function logNewHubUser(userId, username) {
       (user_id, username, logged_at)
     VALUES
       ($1, $2, NOW())
+
     ON CONFLICT (user_id)
     DO UPDATE SET
       username = EXCLUDED.username,
@@ -351,16 +339,11 @@ async function logNewHubUser(userId, username) {
   );
 
   console.log(
-    `Logged new Roblox user ${name} (${id}) to channel ${channelId}`
+    `Logged new Roblox user ${name} (${id})`
   );
 
   return true;
 }
-
-
-// ============================================================
-// ACCESS STATUS
-// ============================================================
 
 async function getPermanentStatus(userId) {
   const id = String(userId);
@@ -393,30 +376,31 @@ async function getPermanentStatus(userId) {
     return "whitelisted";
   }
 
-  return "none";
+  return null;
 }
 
-
-async function getSessionDecision(userId, sessionId) {
+async function getSessionDecision(
+  userId,
+  sessionId
+) {
   const result = await pool.query(
     `
     SELECT decision
     FROM access_sessions
-    WHERE session_id = $1
-      AND user_id = $2
+    WHERE user_id = $1
+      AND session_id = $2
     LIMIT 1
     `,
     [
-      String(sessionId),
-      String(userId)
+      String(userId),
+      String(sessionId)
     ]
   );
 
   return result.rowCount
     ? result.rows[0].decision
-    : "none";
+    : null;
 }
-
 
 async function setSessionDecision(
   userId,
@@ -436,6 +420,7 @@ async function setSessionDecision(
       )
     VALUES
       ($1, $2, $3, $4, NOW())
+
     ON CONFLICT (session_id)
     DO UPDATE SET
       user_id = EXCLUDED.user_id,
@@ -447,23 +432,22 @@ async function setSessionDecision(
       String(sessionId),
       String(userId),
       String(username || "unknown"),
-      decision
+      String(decision)
     ]
   );
 }
 
-
-// ============================================================
-// WHITELIST / BLACKLIST
-// ============================================================
-
-async function addWhitelist(userId, username) {
+async function addWhitelist(
+  userId,
+  username
+) {
   await pool.query(
     `
     INSERT INTO permanent_whitelist
       (user_id, username)
     VALUES
       ($1, $2)
+
     ON CONFLICT (user_id)
     DO UPDATE SET
       username = EXCLUDED.username,
@@ -484,14 +468,17 @@ async function addWhitelist(userId, username) {
   );
 }
 
-
-async function addBlacklist(userId, username) {
+async function addBlacklist(
+  userId,
+  username
+) {
   await pool.query(
     `
     INSERT INTO permanent_blacklist
       (user_id, username)
     VALUES
       ($1, $2)
+
     ON CONFLICT (user_id)
     DO UPDATE SET
       username = EXCLUDED.username,
@@ -520,7 +507,6 @@ async function addBlacklist(userId, username) {
   );
 }
 
-
 async function removeWhitelist(userId) {
   const result = await pool.query(
     `
@@ -532,7 +518,6 @@ async function removeWhitelist(userId) {
 
   return result.rowCount > 0;
 }
-
 
 async function removeBlacklist(userId) {
   const result = await pool.query(
@@ -546,9 +531,8 @@ async function removeBlacklist(userId) {
   return result.rowCount > 0;
 }
 
-
 async function getLists() {
-  const white = await pool.query(
+  const whitelist = await pool.query(
     `
     SELECT user_id, username, approved_at
     FROM permanent_whitelist
@@ -556,7 +540,7 @@ async function getLists() {
     `
   );
 
-  const black = await pool.query(
+  const blacklist = await pool.query(
     `
     SELECT user_id, username, blocked_at
     FROM permanent_blacklist
@@ -565,1791 +549,1382 @@ async function getLists() {
   );
 
   return {
-    whitelist: white.rows,
-    blacklist: black.rows
+    whitelist: whitelist.rows,
+    blacklist: blacklist.rows
   };
 }
 
+function sendGateway(payload) {
+  if (!discordSocket) return;
 
-// ============================================================
-// SLASH COMMANDS
-// ============================================================
-
-const slashCommands = [
-  {
-    name: "whitelist",
-    description:
-      "Permanently allow a user to open the hub",
-
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      },
-      {
-        name: "username",
-        description: "Roblox username (optional)",
-        type: 3,
-        required: false
-      }
-    ]
-  },
-
-  {
-    name: "blacklist",
-    description:
-      "Permanently deny a user from opening the hub",
-
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      },
-      {
-        name: "username",
-        description: "Roblox username (optional)",
-        type: 3,
-        required: false
-      }
-    ]
-  },
-
-  {
-    name: "unwhitelist",
-    description:
-      "Remove a user from the whitelist",
-
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      }
-    ]
-  },
-
-  {
-    name: "unblacklist",
-    description:
-      "Remove a user from the blacklist",
-
-    options: [
-      {
-        name: "user_id",
-        description: "Roblox UserId",
-        type: 3,
-        required: true
-      }
-    ]
-  },
-
-  {
-    name: "list",
-    description:
-      "Show current whitelist and blacklist"
+  if (
+    discordSocket.readyState !== WebSocket.OPEN
+  ) {
+    return;
   }
-];
 
-
-// ============================================================
-// WEB SERVER
-// ============================================================
-
-app.get("/", (_req, res) => {
-  res.status(200).send(
-    client.isReady()
-      ? "All-In-One Approver is online and connected to Discord."
-      : "All-In-One Approver web service is online, but the Discord bot is not connected."
+  discordSocket.send(
+    JSON.stringify(payload)
   );
-});
+}
 
+function startHeartbeat(interval) {
+  stopHeartbeat();
 
-// ============================================================
-// WAKE
-// ============================================================
+  heartbeatAcked = true;
 
-app.get("/wake", (_req, res) => {
-  if (client.isReady()) {
-    return res.status(200).json({
-      ok: true,
-      connected: true,
-      message:
-        "Discord bot is already online."
-    });
-  }
-
-  if (loginInProgress) {
-    return res.status(202).json({
-      ok: true,
-      connected: false,
-      message:
-        "Discord login is already in progress. Check Render logs in a few seconds."
-    });
-  }
-
-  loginDiscord("/wake");
-
-  return res.status(202).json({
-    ok: true,
-    connected: false,
-    message:
-      "Discord login started in the background. Check /health or Render logs."
-  });
-});
-
-
-// ============================================================
-// HEALTH
-// ============================================================
-
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    discordConnected: client.isReady(),
-    discordUser: client.user?.tag || null,
-    slashCommandsRegistered
-  });
-});
-
-
-// ============================================================
-// ROBLOX CHECK
-// ============================================================
-
-app.get("/check", async (req, res) => {
-  try {
-    const userId = String(
-      req.query.userId || ""
-    ).trim();
-
-    const sessionId = String(
-      req.query.sessionId || ""
-    ).trim();
-
-    const username = String(
-      req.query.username || ""
-    ).trim();
-
-    if (!userId) {
-      return res.status(400).json({
-        error: "missing userId"
-      });
-    }
-
-    await logNewHubUser(
-      userId,
-      username
-    ).catch((err) => {
-      console.error(
-        "User logging error:",
-        err?.message || err
-      );
-    });
-
-    const status =
-      await getPermanentStatus(userId);
-
-    if (status === "blacklisted") {
-      return res.json({
-        ok: true,
-        approved: false,
-        denied: true,
-        permanent: true
-      });
-    }
-
-    if (status === "whitelisted") {
-      return res.json({
-        ok: true,
-        approved: true,
-        permanent: true
-      });
-    }
-
-    if (!sessionId) {
-      return res.json({
-        ok: true,
-        approved: false,
-        pending: true
-      });
-    }
-
-    const decision =
-      await getSessionDecision(
-        userId,
-        sessionId
-      );
-
-    if (decision === "accepted") {
-      return res.json({
-        ok: true,
-        approved: true
-      });
-    }
-
-    if (decision === "denied") {
-      return res.json({
-        ok: true,
-        approved: false,
-        denied: true
-      });
-    }
-
-    return res.json({
-      ok: true,
-      approved: false,
-      pending: true
-    });
-
-  } catch (err) {
-    console.error(
-      "check error:",
-      err
-    );
-
-    return res.status(500).json({
-      error: "check failed"
-    });
-  }
-});
-
-
-// ============================================================
-// ACCESS REQUEST
-// ============================================================
-
-app.post("/request", async (req, res) => {
-  try {
-    const {
-      userId,
-      username,
-      displayName,
-      sessionId,
-      place,
-      placeId,
-      jobId
-    } = req.body || {};
-
-    if (!userId || !sessionId) {
-      return res.status(400).json({
-        error:
-          "userId and sessionId are required"
-      });
-    }
-
-    const permanentStatus =
-      await getPermanentStatus(userId);
-
-    if (permanentStatus === "blacklisted") {
-      return res.json({
-        ok: true,
-        approved: false,
-        denied: true,
-        permanent: true
-      });
-    }
-
-    if (permanentStatus === "whitelisted") {
-      return res.json({
-        ok: true,
-        approved: true,
-        permanent: true
-      });
-    }
-
-    const decision =
-      await getSessionDecision(
-        userId,
-        sessionId
-      );
-
-    if (decision === "accepted") {
-      return res.json({
-        ok: true,
-        approved: true
-      });
-    }
-
-    if (decision === "denied") {
-      return res.json({
-        ok: true,
-        approved: false,
-        denied: true
-      });
-    }
-
-    const embed = new EmbedBuilder()
-      .setTitle("Hub Access Request")
-      .setDescription(
-        `**${displayName || username}** (\`${username}\`) wants to open the hub.`
-      )
-      .addFields(
-        {
-          name: "Roblox User",
-          value: String(username),
-          inline: true
-        },
-        {
-          name: "UserId",
-          value: String(userId),
-          inline: true
-        },
-        {
-          name: "Place",
-          value: String(place || "unknown"),
-          inline: true
-        },
-        {
-          name: "Place ID",
-          value: String(placeId || "unknown"),
-          inline: true
-        },
-        {
-          name: "Session",
-          value:
-            `\`${String(sessionId).slice(0, 24)}\``,
-          inline: false
-        },
-        {
-          name: "Server",
-          value:
-            jobId
-              ? `\`${jobId}\``
-              : "n/a",
-          inline: false
-        }
-      )
-      .setColor(0xff3333)
-      .setTimestamp();
-
-    const row =
-      new ActionRowBuilder().addComponents(
-
-        new ButtonBuilder()
-          .setCustomId(
-            `accept:${userId}:${sessionId}:${username}`
-          )
-          .setLabel("Accept")
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `deny:${userId}:${sessionId}:${username}`
-          )
-          .setLabel("Deny")
-          .setStyle(ButtonStyle.Danger),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `whitelist:${userId}:${sessionId}:${username}`
-          )
-          .setLabel("Whitelist")
-          .setStyle(ButtonStyle.Primary),
-
-        new ButtonBuilder()
-          .setCustomId(
-            `blacklist:${userId}:${sessionId}:${username}`
-          )
-          .setLabel("Blacklist")
-          .setStyle(ButtonStyle.Secondary)
-      );
-
-    const owner =
-      await client.users
-        .fetch(
-          String(process.env.OWNER_ID)
-        )
-        .catch((err) => {
-          console.error(
-            "Could not fetch OWNER_ID:",
-            err?.message || err
-          );
-
-          return null;
-        });
-
-    if (!owner) {
-      return res.status(500).json({
-        error:
-          "could not find OWNER_ID on Discord"
-      });
-    }
-
-    try {
-      const dm =
-        await owner.createDM();
-
-      await dm.send({
-        embeds: [embed],
-        components: [row]
-      });
-
-    } catch (dmErr) {
-      console.error(
-        "Owner DM failed:",
-        dmErr?.message || dmErr
-      );
-
-      return res.status(500).json({
-        error:
-          "could not DM owner; check OWNER_ID and Discord DM privacy settings"
-      });
-    }
-
-    return res.json({
-      ok: true,
-      approved: false
-    });
-
-  } catch (err) {
-    console.error(
-      "request error:",
-      err
-    );
-
-    return res.status(500).json({
-      error: "request failed"
-    });
-  }
-});
-
-
-// ============================================================
-// DISCORD INTERACTIONS
-// ============================================================
-
-client.on(
-  "interactionCreate",
-  async (interaction) => {
-
-    // --------------------------------------------------------
-    // COPY USER ID
-    // --------------------------------------------------------
+  heartbeatTimer = setInterval(() => {
+    if (!discordSocket) return;
 
     if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("copyid:")
+      discordSocket.readyState !== WebSocket.OPEN
     ) {
-
-      if (
-        interaction.user.id !==
-        process.env.OWNER_ID
-      ) {
-        return interaction.reply({
-          content:
-            "Only the owner can use this button.",
-          ephemeral: true
-        });
-      }
-
-      const userId =
-        interaction.customId.slice(
-          "copyid:".length
-        );
-
-      if (!/^\d+$/.test(userId)) {
-        return interaction.reply({
-          content:
-            "❌ Invalid Roblox UserId.",
-          ephemeral: true
-        });
-      }
-
-      return interaction.reply({
-        content:
-          `📋 **Roblox UserId**\n` +
-          `\`\`\`text\n${userId}\n\`\`\`\n` +
-          `Use Discord's copy button on the code block to copy it.`,
-        ephemeral: true
-      });
+      return;
     }
 
-
-    // --------------------------------------------------------
-    // SLASH COMMANDS
-    // --------------------------------------------------------
-
-    if (interaction.isChatInputCommand()) {
-
-      if (
-        interaction.user.id !==
-        process.env.OWNER_ID
-      ) {
-        return interaction.reply({
-          content:
-            "Only the owner can use these commands.",
-          ephemeral: true
-        });
-      }
+    if (!heartbeatAcked) {
+      console.warn(
+        "Discord heartbeat was not acknowledged. Reconnecting..."
+      );
 
       try {
-        const command =
-          interaction.commandName;
+        discordSocket.close(
+          4000,
+          "Heartbeat timeout"
+        );
+      } catch {}
 
-        const userId =
-          interaction.options
-            .getString("user_id")
-            ?.trim();
+      return;
+    }
 
-        const username =
-          interaction.options
-            .getString("username")
-            ?.trim() ||
-          "unknown";
+    heartbeatAcked = false;
 
-        await interaction.deferReply({
-          ephemeral: true
-        });
+    sendGateway({
+      op: 1,
+      d: gatewaySequence
+    });
+  }, interval);
 
+  sendGateway({
+    op: 1,
+    d: gatewaySequence
+  });
+}
 
-        // /whitelist
-        if (command === "whitelist") {
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
+  heartbeatAcked = true;
+}
 
-          await addWhitelist(
-            userId,
-            username
-          );
+function identifyGateway() {
+  console.log(
+    "Discord Gateway: sending IDENTIFY..."
+  );
 
-          return interaction.editReply(
-            `✅ Permanently whitelisted \`${username}\` ` +
-            `(UserId: \`${userId}\`).`
-          );
-        }
+  sendGateway({
+    op: 2,
 
+    d: {
+      token: TOKEN,
 
-        // /blacklist
-        if (command === "blacklist") {
+      intents: 1,
 
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
+      properties: {
+        os: "linux",
+        browser: "all-in-one-approver",
+        device: "all-in-one-approver"
+      },
 
-          await addBlacklist(
-            userId,
-            username
-          );
+      presence: {
+        since: null,
+        activities: [],
+        status: "online",
+        afk: false
+      }
+    }
+  });
+}
 
-          return interaction.editReply(
-            `⛔ Permanently blacklisted \`${username}\` ` +
-            `(UserId: \`${userId}\`).`
-          );
-        }
+function resumeGateway() {
+  console.log(
+    "Discord Gateway: attempting RESUME..."
+  );
 
+  sendGateway({
+    op: 6,
 
-        // /unwhitelist
-        if (command === "unwhitelist") {
+    d: {
+      token: TOKEN,
+      session_id: gatewaySessionId,
+      seq: gatewaySequence
+    }
+  });
+}
 
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
+async function registerSlashCommands() {
+  if (!discordUser) return;
 
-          const removed =
-            await removeWhitelist(
-              userId
-            );
+  const channelId =
+    String(
+      process.env.APPROVAL_CHANNEL_ID
+    ).trim();
 
-          return interaction.editReply(
-            removed
-              ? `✅ Removed UserId \`${userId}\` from the permanent whitelist.`
-              : `ℹ️ UserId \`${userId}\` was not on the permanent whitelist.`
-          );
-        }
+  try {
+    const channel = await discordJson(
+      `/channels/${channelId}`
+    );
 
+    if (!channel.guild_id) {
+      console.error(
+        "APPROVAL_CHANNEL_ID is not inside a Discord server."
+      );
 
-        // /unblacklist
-        if (command === "unblacklist") {
+      return;
+    }
 
-          if (!/^\d+$/.test(userId || "")) {
-            return interaction.editReply(
-              "❌ Invalid Roblox UserId. Use the numeric UserId."
-            );
-          }
+    await discordJson(
+      `/applications/${discordUser.id}/guilds/${channel.guild_id}/commands`,
+      {
+        method: "PUT",
+        body: JSON.stringify(
+          slashCommands
+        )
+      }
+    );
 
-          const removed =
-            await removeBlacklist(
-              userId
-            );
+    slashCommandsRegistered = true;
 
-          return interaction.editReply(
-            removed
-              ? `✅ Removed UserId \`${userId}\` from the permanent blacklist.`
-              : `ℹ️ UserId \`${userId}\` was not on the permanent blacklist.`
-          );
-        }
+    console.log(
+      `Registered ${slashCommands.length} slash commands.`
+    );
+  } catch (error) {
+    console.error(
+      "Failed to register slash commands:",
+      error?.stack || error
+    );
+  }
+}
 
+async function sendOwnerDM(content) {
+  const ownerId =
+    String(process.env.OWNER_ID).trim();
 
-        // /list
-        if (command === "list") {
+  const channel = await discordJson(
+    `/users/@me/channels`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        recipient_id: ownerId
+      })
+    }
+  );
 
-          const {
-            whitelist,
-            blacklist
-          } = await getLists();
+  return discordJson(
+    `/channels/${channel.id}/messages`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        content
+      })
+    }
+  );
+}
 
-          const format = (rows) =>
-            rows.length
-              ? rows
-                  .map(
-                    (r) =>
-                      `\`${r.user_id}\` — ${r.username || "unknown"}`
-                  )
-                  .join("\n")
-              : "None";
+async function sendOwnerAccessRequest(data) {
+  const {
+    username,
+    userId,
+    displayName,
+    place,
+    jobId,
+    placeId,
+    sessionId
+  } = data;
 
-          const embed =
-            new EmbedBuilder()
-              .setTitle(
-                "Current Access Lists"
-              )
-              .addFields(
+  const ownerId =
+    String(process.env.OWNER_ID).trim();
+
+  const channel =
+    await discordJson(
+      `/users/@me/channels`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          recipient_id: ownerId
+        })
+      }
+    );
+
+  const message =
+    await discordJson(
+      `/channels/${channel.id}/messages`,
+      {
+        method: "POST",
+
+        body: JSON.stringify({
+          content:
+            `🔐 **Hub Access Request**\n\n` +
+            `**Username:** ${username}\n` +
+            `**User ID:** ${userId}\n` +
+            `**Display Name:** ${displayName || "N/A"}\n` +
+            `**Place:** ${place || "N/A"}\n` +
+            `**Place ID:** ${placeId || "N/A"}\n` +
+            `**Job ID:** ${jobId || "N/A"}\n` +
+            `**Session ID:** ${sessionId}`,
+
+          components: [
+            {
+              type: 1,
+
+              components: [
                 {
-                  name:
-                    `✅ Whitelist (${whitelist.length})`,
-                  value:
-                    format(
-                      whitelist
-                    ).slice(0, 1024),
-                  inline: false
+                  type: 2,
+                  style: 3,
+                  label: "Accept",
+                  custom_id:
+                    `accept:${userId}:${sessionId}`
                 },
+
                 {
-                  name:
-                    `⛔ Blacklist (${blacklist.length})`,
-                  value:
-                    format(
-                      blacklist
-                    ).slice(0, 1024),
-                  inline: false
+                  type: 2,
+                  style: 4,
+                  label: "Deny",
+                  custom_id:
+                    `deny:${userId}:${sessionId}`
+                },
+
+                {
+                  type: 2,
+                  style: 1,
+                  label: "Whitelist",
+                  custom_id:
+                    `whitelist:${userId}:${sessionId}`
+                },
+
+                {
+                  type: 2,
+                  style: 4,
+                  label: "Blacklist",
+                  custom_id:
+                    `blacklist:${userId}:${sessionId}`
                 }
-              )
-              .setColor(0x5865f2)
-              .setTimestamp();
+              ]
+            }
+          ]
+        })
+      }
+    );
 
-          return interaction.editReply({
-            embeds: [embed]
-          });
+  return message;
+}
+
+async function acknowledgeInteraction(
+  interaction,
+  content,
+  ephemeral = true
+) {
+  const flags = ephemeral ? 64 : 0;
+
+  return discordJson(
+    `/interactions/${interaction.id}/${interaction.token}/callback`,
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        type: 4,
+
+        data: {
+          content,
+          flags
         }
+      })
+    }
+  );
+}
 
+async function updateInteractionMessage(
+  interaction,
+  content
+) {
+  return discordJson(
+    `/webhooks/${discordUser.id}/${interaction.token}/messages/@original`,
+    {
+      method: "PATCH",
 
-        return interaction.editReply(
-          "Unknown command."
+      body: JSON.stringify({
+        content,
+        components: []
+      })
+    }
+  );
+}
+
+async function handleButtonInteraction(
+  interaction
+) {
+  const customId =
+    String(
+      interaction.data?.custom_id || ""
+    );
+
+  const parts = customId.split(":");
+
+  if (parts.length < 3) return;
+
+  const action = parts[0];
+  const userId = parts[1];
+  const sessionId = parts.slice(2).join(":");
+
+  if (action === "copyid") {
+    await acknowledgeInteraction(
+      interaction,
+      `User ID: ${userId}`,
+      true
+    );
+
+    return;
+  }
+
+  if (
+    String(interaction.member?.user?.id) !==
+    String(process.env.OWNER_ID)
+  ) {
+    await acknowledgeInteraction(
+      interaction,
+      "You are not authorized to use these buttons.",
+      true
+    );
+
+    return;
+  }
+
+  const username =
+    await getStoredUsername(
+      userId
+    );
+
+  if (action === "accept") {
+    await setSessionDecision(
+      userId,
+      username,
+      sessionId,
+      "accepted"
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      "✅ Access accepted for this session.",
+      true
+    );
+
+    return;
+  }
+
+  if (action === "deny") {
+    await setSessionDecision(
+      userId,
+      username,
+      sessionId,
+      "denied"
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      "❌ Access denied for this session.",
+      true
+    );
+
+    return;
+  }
+
+  if (action === "whitelist") {
+    await addWhitelist(
+      userId,
+      username
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      `✅ <@${userId}> has been permanently whitelisted.`,
+      true
+    );
+
+    return;
+  }
+
+  if (action === "blacklist") {
+    await addBlacklist(
+      userId,
+      username
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      `🚫 <@${userId}> has been permanently blacklisted.`,
+      true
+    );
+
+    return;
+  }
+}
+
+async function handleSlashCommand(
+  interaction
+) {
+  const name =
+    interaction.data?.name;
+
+  if (
+    String(interaction.member?.user?.id) !==
+    String(process.env.OWNER_ID)
+  ) {
+    await acknowledgeInteraction(
+      interaction,
+      "You are not authorized to use this command.",
+      true
+    );
+
+    return;
+  }
+
+  const options =
+    interaction.data?.options || [];
+
+  const getOption = key =>
+    options.find(
+      option => option.name === key
+    )?.value;
+
+  if (name === "whitelist") {
+    const userId =
+      getOption("user_id");
+
+    const username =
+      getOption("username") ||
+      await getStoredUsername(userId);
+
+    await addWhitelist(
+      userId,
+      username
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      `✅ Permanently whitelisted **${username}** (${userId}).`,
+      true
+    );
+
+    return;
+  }
+
+  if (name === "blacklist") {
+    const userId =
+      getOption("user_id");
+
+    const username =
+      getOption("username") ||
+      await getStoredUsername(userId);
+
+    await addBlacklist(
+      userId,
+      username
+    );
+
+    await acknowledgeInteraction(
+      interaction,
+      `🚫 Permanently blacklisted **${username}** (${userId}).`,
+      true
+    );
+
+    return;
+  }
+
+  if (name === "unwhitelist") {
+    const userId =
+      getOption("user_id");
+
+    const removed =
+      await removeWhitelist(
+        userId
+      );
+
+    await acknowledgeInteraction(
+      interaction,
+      removed
+        ? `✅ Removed ${userId} from the whitelist.`
+        : `ℹ️ ${userId} was not on the whitelist.`,
+      true
+    );
+
+    return;
+  }
+
+  if (name === "unblacklist") {
+    const userId =
+      getOption("user_id");
+
+    const removed =
+      await removeBlacklist(
+        userId
+      );
+
+    await acknowledgeInteraction(
+      interaction,
+      removed
+        ? `✅ Removed ${userId} from the blacklist.`
+        : `ℹ️ ${userId} was not on the blacklist.`,
+      true
+    );
+
+    return;
+  }
+
+  if (name === "list") {
+    const lists =
+      await getLists();
+
+    const white =
+      lists.whitelist.length
+        ? lists.whitelist
+            .map(
+              x =>
+                `• ${x.username || "unknown"} — \`${x.user_id}\``
+            )
+            .join("\n")
+        : "None";
+
+    const black =
+      lists.blacklist.length
+        ? lists.blacklist
+            .map(
+              x =>
+                `• ${x.username || "unknown"} — \`${x.user_id}\``
+            )
+            .join("\n")
+        : "None";
+
+    await acknowledgeInteraction(
+      interaction,
+      `**Whitelist**\n${white}\n\n**Blacklist**\n${black}`,
+      true
+    );
+  }
+}
+
+async function handleInteraction(
+  interaction
+) {
+  try {
+    if (interaction.type === 2) {
+      await handleSlashCommand(
+        interaction
+      );
+
+      return;
+    }
+
+    if (interaction.type === 3) {
+      await handleButtonInteraction(
+        interaction
+      );
+
+      return;
+    }
+  } catch (error) {
+    console.error(
+      "Interaction error:",
+      error?.stack || error
+    );
+
+    try {
+      await acknowledgeInteraction(
+        interaction,
+        "An error occurred while processing that action.",
+        true
+      );
+    } catch {}
+  }
+}
+
+async function handleGatewayDispatch(
+  data
+) {
+  gatewaySequence = data.s;
+
+  switch (data.t) {
+    case "READY":
+      discordUser = data.d?.user || null;
+
+      gatewaySessionId =
+        data.d?.session_id ||
+        gatewaySessionId;
+
+      gatewayResumeUrl =
+        data.d?.resume_gateway_url ||
+        GATEWAY_URL;
+
+      discordReady = true;
+      loginInProgress = false;
+      gatewayConnecting = false;
+      reconnectAttempt = 0;
+
+      console.log(
+        `Discord Gateway READY as ${
+          discordUser?.username || "unknown"
+        }`
+      );
+
+      logDiscordState();
+
+      await registerSlashCommands();
+
+      break;
+
+    case "RESUMED":
+      discordReady = true;
+      loginInProgress = false;
+      gatewayConnecting = false;
+      reconnectAttempt = 0;
+
+      console.log(
+        "Discord Gateway session RESUMED."
+      );
+
+      logDiscordState();
+
+      break;
+
+    case "INTERACTION_CREATE":
+      await handleInteraction(
+        data.d
+      );
+
+      break;
+
+    case "RECONNECT":
+      console.warn(
+        "Discord Gateway requested a reconnect."
+      );
+
+      try {
+        discordSocket?.close(
+          4000,
+          "Discord requested reconnect"
+        );
+      } catch {}
+
+      break;
+
+    case "INVALID_SESSION":
+      console.warn(
+        `Discord Gateway INVALID_SESSION (resumable=${!!data.d}).`
+      );
+
+      gatewaySessionId = null;
+      gatewaySequence = null;
+      gatewayResumeUrl = null;
+
+      try {
+        discordSocket?.close(
+          4000,
+          "Invalid session"
+        );
+      } catch {}
+
+      break;
+
+    default:
+      break;
+  }
+}
+
+function parseGatewayMessage(raw) {
+  try {
+    if (typeof raw === "string") {
+      return JSON.parse(raw);
+    }
+
+    if (raw instanceof ArrayBuffer) {
+      return JSON.parse(
+        Buffer.from(raw).toString("utf8")
+      );
+    }
+
+    if (ArrayBuffer.isView(raw)) {
+      return JSON.parse(
+        Buffer.from(
+          raw.buffer,
+          raw.byteOffset,
+          raw.byteLength
+        ).toString("utf8")
+      );
+    }
+
+    return JSON.parse(String(raw));
+  } catch (error) {
+    console.error(
+      "Could not parse Discord Gateway message:",
+      error?.message || error
+    );
+
+    return null;
+  }
+}
+
+function connectGateway(
+  reason = "startup"
+) {
+  if (
+    gatewayConnecting ||
+    isDiscordConnected()
+  ) {
+    return;
+  }
+
+  gatewayConnecting = true;
+  loginInProgress = true;
+  discordReady = false;
+  slashCommandsRegistered = false;
+
+  console.log(
+    `Attempting direct Discord Gateway connection (${reason})...`
+  );
+
+  console.log(
+    `Token exists: ${!!TOKEN}; token length: ${TOKEN.length}`
+  );
+
+  console.log(
+    "Using Node built-in WebSocket; discord.js Gateway client is bypassed."
+  );
+
+  let socket;
+
+  try {
+    socket =
+      new WebSocket(
+        GATEWAY_URL
+      );
+  } catch (error) {
+    gatewayConnecting = false;
+    loginInProgress = false;
+
+    console.error(
+      "Could not create Discord WebSocket:",
+      error?.stack || error
+    );
+
+    scheduleReconnect();
+
+    return;
+  }
+
+  discordSocket = socket;
+
+  socket.addEventListener(
+    "open",
+    () => {
+      console.log(
+        "Discord Gateway WebSocket: OPEN"
+      );
+    }
+  );
+
+  socket.addEventListener(
+    "message",
+    async event => {
+      const data =
+        parseGatewayMessage(
+          event.data
         );
 
-      } catch (err) {
+      if (!data) return;
 
-        console.error(
-          "slash command error:",
-          err
+      if (data.op === 10) {
+        console.log(
+          `Discord Gateway HELLO received. Heartbeat interval: ${data.d?.heartbeat_interval}ms`
+        );
+
+        gatewayConnecting = false;
+
+        startHeartbeat(
+          Number(
+            data.d.heartbeat_interval
+          )
         );
 
         if (
-          interaction.deferred ||
-          interaction.replied
+          gatewaySessionId &&
+          gatewaySequence != null
         ) {
-          await interaction
-            .editReply(
-              "❌ Database error while running that command."
-            )
-            .catch(() => {});
+          resumeGateway();
         } else {
-          await interaction
-            .reply({
-              content:
-                "❌ Database error while running that command.",
-              ephemeral: true
-            })
-            .catch(() => {});
+          identifyGateway();
         }
+
+        return;
       }
 
-      return;
+      if (data.op === 11) {
+        heartbeatAcked = true;
+        return;
+      }
+
+      if (data.op === 0) {
+        await handleGatewayDispatch(
+          data
+        );
+
+        return;
+      }
+
+      if (data.op === 1) {
+        heartbeatAcked = false;
+
+        sendGateway({
+          op: 1,
+          d: gatewaySequence
+        });
+
+        return;
+      }
+
+      if (data.op === 7) {
+        console.warn(
+          "Discord Gateway OP 7 RECONNECT received."
+        );
+
+        try {
+          socket.close(
+            4000,
+            "Reconnect requested"
+          );
+        } catch {}
+
+        return;
+      }
+
+      if (data.op === 9) {
+        console.warn(
+          `Discord Gateway OP 9 INVALID_SESSION received (resumable=${!!data.d}).`
+        );
+
+        if (!data.d) {
+          gatewaySessionId = null;
+          gatewaySequence = null;
+          gatewayResumeUrl = null;
+        }
+
+        setTimeout(() => {
+          try {
+            socket.close(
+              4000,
+              "Invalid session"
+            );
+          } catch {}
+        }, data.d ? 1000 : 3000);
+      }
     }
+  );
 
-
-    // --------------------------------------------------------
-    // BUTTONS
-    // --------------------------------------------------------
-
-    if (!interaction.isButton()) {
-      return;
+  socket.addEventListener(
+    "error",
+    event => {
+      console.error(
+        "Discord Gateway WebSocket error:",
+        event?.error?.message ||
+        event?.message ||
+        "WebSocket error"
+      );
     }
+  );
 
-    if (
-      interaction.user.id !==
-      process.env.OWNER_ID
-    ) {
-      return interaction.reply({
-        content:
-          "Only the owner can use these buttons.",
-        ephemeral: true
-      });
-    }
+  socket.addEventListener(
+    "close",
+    event => {
+      stopHeartbeat();
 
-    const parts =
-      interaction.customId.split(":");
+      const wasReady =
+        discordReady;
 
-    const action = parts[0];
-    const userId = parts[1];
-    const sessionId = parts[2];
-
-    const username =
-      parts
-        .slice(3)
-        .join(":") ||
-      "unknown";
-
-
-    try {
-
-      // ACCEPT
-      if (action === "accept") {
-
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "accepted"
-        );
-
-        await interaction.update({
-          content:
-            `✅ **Accepted for this session only** — \`${username}\`\n` +
-            `This does NOT whitelist them.`,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
-      }
-
-
-      // DENY
-      if (action === "deny") {
-
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "denied"
-        );
-
-        await interaction.update({
-          content:
-            `❌ **Denied** — \`${username}\`\n` +
-            `This does NOT blacklist them.`,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
-      }
-
-
-      // WHITELIST
-      if (action === "whitelist") {
-
-        await addWhitelist(
-          userId,
-          username
-        );
-
-        await setSessionDecision(
-          userId,
-          username,
-          sessionId,
-          "accepted"
-        );
-
-        await interaction.update({
-          content:
-            `✅ **Whitelisted permanently** — \`${username}\``,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
-      }
-
-
-      // BLACKLIST
-      if (action === "blacklist") {
-
-        await addBlacklist(
-          userId,
-          username
-        );
-
-        await interaction.update({
-          content:
-            `⛔ **Blacklisted permanently** — \`${username}\``,
-          embeds:
-            interaction.message.embeds,
-          components: []
-        });
-
-        return;
-      }
-
-    } catch (err) {
+      discordReady = false;
+      gatewayConnecting = false;
+      loginInProgress = false;
 
       console.error(
-        "interaction error:",
-        err
+        `Discord Gateway CLOSED: code=${event.code}, reason=${event.reason || "none"}, wasReady=${wasReady}`
       );
 
       if (
-        !interaction.replied &&
-        !interaction.deferred
+        discordSocket === socket
       ) {
-        await interaction
-          .reply({
-            content:
-              "Database error while updating this request.",
-            ephemeral: true
-          })
-          .catch(() => {});
+        discordSocket = null;
       }
+
+      logDiscordState();
+
+      scheduleReconnect();
+    }
+  );
+}
+
+function scheduleReconnect() {
+  if (
+    reconnectTimer ||
+    isDiscordConnected()
+  ) {
+    return;
+  }
+
+  reconnectAttempt += 1;
+
+  const delay =
+    Math.min(
+      300000,
+      5000 *
+        Math.pow(
+          2,
+          Math.min(
+            reconnectAttempt - 1,
+            5
+          )
+        )
+    );
+
+  console.log(
+    `Discord reconnect attempt #${reconnectAttempt} scheduled in ${Math.round(
+      delay / 1000
+    )} seconds.`
+  );
+
+  reconnectTimer =
+    setTimeout(() => {
+      reconnectTimer = null;
+
+      connectGateway(
+        `automatic retry #${reconnectAttempt}`
+      );
+    }, delay);
+}
+
+async function checkDiscordNetwork() {
+  console.log(
+    "\n========================================"
+  );
+
+  console.log(
+    "Discord network diagnostic starting..."
+  );
+
+  console.log(
+    "========================================"
+  );
+
+  try {
+    const response =
+      await fetch(
+        "https://discord.com/api/v10/gateway",
+        {
+          headers: {
+            "User-Agent":
+              "All-In-One-Approver/1.0"
+          },
+
+          signal:
+            AbortSignal.timeout(
+              10000
+            )
+        }
+      );
+
+    console.log(
+      `Discord HTTPS gateway check: HTTP ${response.status}`
+    );
+  } catch (error) {
+    console.error(
+      `Discord HTTPS check failed: ${
+        error?.name || "Error"
+      }: ${
+        error?.message || error
+      }`
+    );
+  }
+
+  console.log(
+    "========================================"
+  );
+
+  console.log(
+    "Discord network diagnostic finished."
+  );
+
+  console.log(
+    "========================================\n"
+  );
+}
+
+app.get(
+  "/",
+  (_req, res) => {
+    res.status(200).send(
+      isDiscordConnected()
+        ? "All-In-One Approver is online and connected to Discord."
+        : "All-In-One Approver web service is online, but the Discord bot is not connected."
+    );
+  }
+);
+
+app.get(
+  "/wake",
+  (_req, res) => {
+    if (
+      isDiscordConnected()
+    ) {
+      return res
+        .status(200)
+        .json({
+          ok: true,
+          connected: true,
+          message:
+            "Discord bot is already online."
+        });
+    }
+
+    if (
+      loginInProgress ||
+      gatewayConnecting
+    ) {
+      return res
+        .status(202)
+        .json({
+          ok: true,
+          connected: false,
+          message:
+            "Discord Gateway connection is already in progress."
+        });
+    }
+
+    connectGateway(
+      "/wake"
+    );
+
+    return res
+      .status(202)
+      .json({
+        ok: true,
+        connected: false,
+        message:
+          "Discord Gateway connection started."
+      });
+  }
+);
+
+app.get(
+  "/health",
+  (_req, res) => {
+    res.json({
+      ok: true,
+
+      discordConnected:
+        isDiscordConnected(),
+
+      discordUser:
+        discordUser
+          ? discordUser.username
+          : null,
+
+      slashCommandsRegistered,
+
+      gatewaySession:
+        !!gatewaySessionId
+    });
+  }
+);
+
+app.get(
+  "/check",
+  async (req, res) => {
+    try {
+      const userId =
+        String(
+          req.query.userId || ""
+        ).trim();
+
+      const sessionId =
+        String(
+          req.query.sessionId || ""
+        ).trim();
+
+      if (
+        !userId ||
+        !sessionId
+      ) {
+        return res
+          .status(400)
+          .json({
+            approved: false
+          });
+      }
+
+      const permanent =
+        await getPermanentStatus(
+          userId
+        );
+
+      if (
+        permanent ===
+        "blacklisted"
+      ) {
+        return res.json({
+          approved: false,
+          denied: true,
+          blacklisted: true
+        });
+      }
+
+      if (
+        permanent ===
+        "whitelisted"
+      ) {
+        return res.json({
+          approved: true,
+          whitelisted: true
+        });
+      }
+
+      const decision =
+        await getSessionDecision(
+          userId,
+          sessionId
+        );
+
+      if (
+        decision ===
+        "accepted"
+      ) {
+        return res.json({
+          approved: true
+        });
+      }
+
+      if (
+        decision ===
+        "denied"
+      ) {
+        return res.json({
+          approved: false,
+          denied: true
+        });
+      }
+
+      res.json({
+        approved: false
+      });
+    } catch (error) {
+      console.error(
+        "check error:",
+        error?.stack || error
+      );
+
+      res
+        .status(500)
+        .json({
+          approved: false
+        });
     }
   }
 );
 
-
-// ============================================================
-// RAW DISCORD WEBSOCKET DIAGNOSTIC
-//
-// This is independent of discord.js.
-//
-// We already know this succeeds on your Render service,
-// but we're keeping it here so future deploys immediately
-// tell us whether Discord's Gateway is reachable.
-// ============================================================
-
-function createWebSocketKey() {
-  return crypto
-    .randomBytes(16)
-    .toString("base64");
-}
-
-
-function parseWebSocketFrames(buffer) {
-  const frames = [];
-
-  let offset = 0;
-
-  while (offset + 2 <= buffer.length) {
-
-    const first = buffer[offset];
-    const second = buffer[offset + 1];
-
-    const fin = (first & 0x80) !== 0;
-    const opcode = first & 0x0f;
-
-    const masked = (second & 0x80) !== 0;
-
-    let payloadLength = second & 0x7f;
-
-    offset += 2;
-
-    if (payloadLength === 126) {
-
-      if (offset + 2 > buffer.length) {
-        break;
-      }
-
-      payloadLength =
-        buffer.readUInt16BE(offset);
-
-      offset += 2;
-
-    } else if (payloadLength === 127) {
-
-      if (offset + 8 > buffer.length) {
-        break;
-      }
-
-      const high =
-        buffer.readUInt32BE(offset);
-
-      const low =
-        buffer.readUInt32BE(offset + 4);
-
-      offset += 8;
-
-      payloadLength =
-        high * 4294967296 + low;
-    }
-
-    let mask;
-
-    if (masked) {
-
-      if (offset + 4 > buffer.length) {
-        break;
-      }
-
-      mask =
-        buffer.subarray(
-          offset,
-          offset + 4
-        );
-
-      offset += 4;
-    }
-
-    if (
-      offset + payloadLength >
-      buffer.length
-    ) {
-      break;
-    }
-
-    let payload =
-      buffer.subarray(
-        offset,
-        offset + payloadLength
-      );
-
-    offset += payloadLength;
-
-    if (masked) {
-
-      const decoded =
-        Buffer.alloc(payload.length);
-
-      for (
-        let i = 0;
-        i < payload.length;
-        i++
-      ) {
-        decoded[i] =
-          payload[i] ^
-          mask[i % 4];
-      }
-
-      payload = decoded;
-    }
-
-    frames.push({
-      fin,
-      opcode,
-      payload
-    });
-  }
-
-  return frames;
-}
-
-
-function runRawDiscordWebSocketDiagnostic() {
-  return new Promise(async (resolve) => {
-
-    console.log("");
-    console.log("========================================");
-    console.log("Discord raw WebSocket diagnostic starting...");
-    console.log("========================================");
-
-    let settled = false;
-    let socket = null;
-
-    const finish = (result) => {
-
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-
-      if (socket) {
-        socket.destroy();
-      }
-
-      console.log(
-        "Raw Discord WebSocket result:",
-        result
-      );
-
-      resolve(result);
-    };
-
-    const timeout = setTimeout(() => {
-
-      console.error(
-        "Discord raw WebSocket diagnostic timed out."
-      );
-
-      finish({
-        ok: false,
-        hello: false,
-        error: "timeout"
-      });
-
-    }, 15000);
-
-
+app.post(
+  "/request",
+  async (req, res) => {
     try {
+      const {
+        username,
+        userId,
+        displayName,
+        place,
+        jobId,
+        placeId,
+        sessionId
+      } = req.body;
 
-      const addresses =
-        await dns.lookup(
-          "gateway.discord.gg",
-          {
-            all: true
-          }
+      if (
+        !username ||
+        !userId ||
+        !sessionId
+      ) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "missing username, userId, or sessionId"
+          });
+      }
+
+      if (
+        !isDiscordConnected()
+      ) {
+        return res
+          .status(503)
+          .json({
+            error:
+              "Discord bot is not connected yet"
+          });
+      }
+
+      await logNewHubUser(
+        userId,
+        username
+      );
+
+      const permanent =
+        await getPermanentStatus(
+          userId
         );
 
-      if (!addresses.length) {
-
-        clearTimeout(timeout);
-
-        return finish({
-          ok: false,
-          hello: false,
-          error: "gateway.discord.gg DNS returned no addresses"
+      if (
+        permanent ===
+        "blacklisted"
+      ) {
+        return res.json({
+          ok: true,
+          approved: false,
+          blacklisted: true
         });
       }
 
-      const address =
-        addresses[0].address;
+      if (
+        permanent ===
+        "whitelisted"
+      ) {
+        return res.json({
+          ok: true,
+          approved: true,
+          whitelisted: true
+        });
+      }
 
-      console.log(
-        `Discord raw WebSocket target: ${address}:443`
+      const decision =
+        await getSessionDecision(
+          userId,
+          sessionId
+        );
+
+      if (
+        decision ===
+        "accepted"
+      ) {
+        return res.json({
+          ok: true,
+          approved: true
+        });
+      }
+
+      if (
+        decision ===
+        "denied"
+      ) {
+        return res.json({
+          ok: true,
+          approved: false,
+          denied: true
+        });
+      }
+
+      try {
+        await sendOwnerAccessRequest({
+          username,
+          userId,
+          displayName,
+          place,
+          jobId,
+          placeId,
+          sessionId
+        });
+      } catch (error) {
+        console.error(
+          "Owner DM failed:",
+          error?.stack || error
+        );
+
+        return res
+          .status(500)
+          .json({
+            error:
+              "could not DM owner"
+          });
+      }
+
+      res.json({
+        ok: true,
+        approved: false
+      });
+    } catch (error) {
+      console.error(
+        "request error:",
+        error?.stack || error
       );
 
-      const key =
-        createWebSocketKey();
-
-      socket = tls.connect({
-        host: address,
-        port: 443,
-        servername: "gateway.discord.gg",
-        rejectUnauthorized: true
-      });
-
-      let handshakeBuffer =
-        Buffer.alloc(0);
-
-      let handshakeComplete = false;
-
-      let frameBuffer =
-        Buffer.alloc(0);
-
-      socket.setTimeout(12000);
-
-      socket.on("secureConnect", () => {
-
-        console.log(
-          "Discord raw WebSocket: TLS CONNECTED"
-        );
-
-        const request =
-          [
-            "GET /?v=10&encoding=json HTTP/1.1",
-            "Host: gateway.discord.gg",
-            "Upgrade: websocket",
-            "Connection: Upgrade",
-            `Sec-WebSocket-Key: ${key}`,
-            "Sec-WebSocket-Version: 13",
-            "",
-            ""
-          ].join("\r\n");
-
-        socket.write(request);
-      });
-
-
-      socket.on("data", (chunk) => {
-
-        if (!handshakeComplete) {
-
-          handshakeBuffer =
-            Buffer.concat([
-              handshakeBuffer,
-              chunk
-            ]);
-
-          const headerEnd =
-            handshakeBuffer.indexOf(
-              "\r\n\r\n"
-            );
-
-          if (headerEnd === -1) {
-            return;
-          }
-
-          const header =
-            handshakeBuffer
-              .subarray(
-                0,
-                headerEnd
-              )
-              .toString();
-
-          console.log(
-            "Discord raw WebSocket HTTP response:",
-            header.split("\r\n")[0]
-          );
-
-          if (
-            !/^HTTP\/1\.1 101/i.test(header)
-          ) {
-
-            clearTimeout(timeout);
-
-            return finish({
-              ok: false,
-              hello: false,
-              error:
-                `WebSocket upgrade failed: ${header.split("\r\n")[0]}`
-            });
-          }
-
-          handshakeComplete = true;
-
-          console.log(
-            "Discord raw WebSocket: UPGRADE SUCCESSFUL"
-          );
-
-          const remaining =
-            handshakeBuffer.subarray(
-              headerEnd + 4
-            );
-
-          frameBuffer =
-            Buffer.concat([
-              frameBuffer,
-              remaining
-            ]);
-
-          handshakeBuffer =
-            Buffer.alloc(0);
-
-        } else {
-
-          frameBuffer =
-            Buffer.concat([
-              frameBuffer,
-              chunk
-            ]);
-        }
-
-
-        if (!handshakeComplete) {
-          return;
-        }
-
-
-        const frames =
-          parseWebSocketFrames(
-            frameBuffer
-          );
-
-        // We don't know how many bytes were
-        // consumed by the parser, so for this
-        // diagnostic we keep enough data for
-        // normal Discord HELLO frames.
-        //
-        // Once a frame is successfully parsed,
-        // clear the buffer.
-        if (frames.length) {
-          frameBuffer = Buffer.alloc(0);
-        }
-
-
-        for (const frame of frames) {
-
-          if (frame.opcode === 0x8) {
-
-            let closeCode = null;
-            let closeReason = "";
-
-            if (frame.payload.length >= 2) {
-              closeCode =
-                frame.payload.readUInt16BE(0);
-
-              closeReason =
-                frame.payload
-                  .subarray(2)
-                  .toString();
-            }
-
-            console.error(
-              "Discord raw WebSocket: CLOSE received:",
-              closeCode,
-              closeReason
-            );
-
-            clearTimeout(timeout);
-
-            return finish({
-              ok: false,
-              hello: false,
-              closeCode,
-              closeReason
-            });
-          }
-
-
-          if (frame.opcode === 0x9) {
-            console.log(
-              "Discord raw WebSocket: PING received."
-            );
-
-            continue;
-          }
-
-
-          if (frame.opcode !== 0x1) {
-            continue;
-          }
-
-
-          const text =
-            frame.payload.toString();
-
-          let data;
-
-          try {
-            data = JSON.parse(text);
-          } catch {
-            continue;
-          }
-
-
-          console.log(
-            "Discord raw WebSocket: RECEIVED OP",
-            data.op
-          );
-
-
-          if (data.op === 10) {
-
-            console.log(
-              "Discord raw WebSocket: HELLO RECEIVED"
-            );
-
-            clearTimeout(timeout);
-
-            return finish({
-              ok: true,
-              hello: true
-            });
-          }
-        }
-      });
-
-
-      socket.on("timeout", () => {
-
-        console.error(
-          "Discord raw WebSocket: socket timeout."
-        );
-
-        clearTimeout(timeout);
-
-        finish({
-          ok: false,
-          hello: false,
-          error: "socket timeout"
-        });
-      });
-
-
-      socket.on("error", (err) => {
-
-        console.error(
-          "Discord raw WebSocket error:",
-          err?.stack || err
-        );
-
-        clearTimeout(timeout);
-
-        finish({
-          ok: false,
-          hello: false,
+      res
+        .status(500)
+        .json({
           error:
-            err?.message || String(err)
+            "request failed"
         });
-      });
-
-
-      socket.on("close", () => {
-
-        if (settled) {
-          return;
-        }
-
-        console.error(
-          "Discord raw WebSocket closed before HELLO."
-        );
-
-        clearTimeout(timeout);
-
-        finish({
-          ok: false,
-          hello: false,
-          error: "socket closed"
-        });
-      });
-
-    } catch (err) {
-
-      clearTimeout(timeout);
-
-      console.error(
-        "Discord raw WebSocket diagnostic exception:",
-        err?.stack || err
-      );
-
-      finish({
-        ok: false,
-        hello: false,
-        error:
-          err?.message || String(err)
-      });
     }
-  });
-}
-
-
-// ============================================================
-// DISCORD LOGIN
-// ============================================================
-
-async function loginDiscord(
-  reason = "startup"
-) {
-
-  if (client.isReady()) {
-
-    console.log(
-      `Discord is already connected; ignoring login request (${reason}).`
-    );
-
-    return true;
   }
-
-  if (loginInProgress) {
-
-    console.log(
-      `Discord login is already in progress; ignoring login request (${reason}).`
-    );
-
-    return false;
-  }
-
-  if (!process.env.DISCORD_TOKEN) {
-
-    console.error(
-      "DISCORD_TOKEN is missing; cannot connect to Discord."
-    );
-
-    return false;
-  }
-
-  loginInProgress = true;
-
-  console.log("");
-  console.log("========================================");
-  console.log(
-    `Attempting Discord login (${reason})...`
-  );
-  console.log("========================================");
-
-  console.log(
-    "discord.js version:",
-    require("discord.js").version
-  );
-
-  console.log(
-    "Discord WebSocket options:",
-    {
-      version: "10",
-      encoding: "json",
-      compression: null,
-      handshakeTimeout: 30000,
-      helloTimeout: 60000,
-      readyTimeout: 30000
-    }
-  );
-
-  console.log(
-    "Token exists:",
-    Boolean(process.env.DISCORD_TOKEN)
-  );
-
-  console.log(
-    "Token length:",
-    process.env.DISCORD_TOKEN.length
-  );
-
-
-  try {
-
-    console.log(
-      "Calling client.login()..."
-    );
-
-    console.log(
-      "Waiting for discord.js Gateway events..."
-    );
-
-    const loginPromise =
-      client.login(
-        process.env.DISCORD_TOKEN
-      );
-
-
-    const watchdog =
-      new Promise((_, reject) => {
-
-        setTimeout(() => {
-
-          reject(
-            new Error(
-              "discord.js login did not finish within 90 seconds."
-            )
-          );
-
-        }, 90000);
-      });
-
-
-    await Promise.race([
-      loginPromise,
-      watchdog
-    ]);
-
-
-    console.log(
-      "client.login() promise completed."
-    );
-
-    console.log(
-      "client.isReady():",
-      client.isReady()
-    );
-
-    console.log(
-      "client.user:",
-      client.user
-        ? `${client.user.tag} (${client.user.id})`
-        : "none"
-    );
-
-    return true;
-
-  } catch (err) {
-
-    console.error("");
-    console.error(
-      "========================================"
-    );
-    console.error(
-      "Discord login failed or timed out"
-    );
-    console.error(
-      "========================================"
-    );
-
-    console.error(
-      err?.stack || err
-    );
-
-    const status =
-      err?.status ??
-      err?.statusCode ??
-      err?.response?.status;
-
-    const code =
-      err?.code ??
-      err?.cause?.code;
-
-    if (status) {
-      console.error(
-        `Discord/HTTP status: ${status}`
-      );
-    }
-
-    if (code) {
-      console.error(
-        `Error code: ${code}`
-      );
-    }
-
-    console.error(
-      "Client ready state:",
-      client.isReady()
-    );
-
-    console.error(
-      "Discord user:",
-      client.user
-        ? client.user.tag
-        : "none"
-    );
-
-    return false;
-
-  } finally {
-
-    loginInProgress = false;
-  }
-}
-
-
-// ============================================================
-// NETWORK DIAGNOSTIC
-// ============================================================
-
-async function runDiscordNetworkDiagnostic() {
-
-  console.log("");
-  console.log("========================================");
-  console.log("Discord network diagnostic starting...");
-  console.log("========================================");
-
-
-  // DNS: discord.com
-  try {
-
-    const result =
-      await dns.lookup(
-        "discord.com"
-      );
-
-    console.log(
-      `Discord DNS (discord.com): OK -> ${result.address}`
-    );
-
-  } catch (err) {
-
-    console.error(
-      "Discord DNS (discord.com): FAILED",
-      err?.message || err
-    );
-  }
-
-
-  // DNS: gateway.discord.gg
-  try {
-
-    const result =
-      await dns.lookup(
-        "gateway.discord.gg"
-      );
-
-    console.log(
-      `Discord Gateway DNS (gateway.discord.gg): OK -> ${result.address}`
-    );
-
-  } catch (err) {
-
-    console.error(
-      "Discord Gateway DNS (gateway.discord.gg): FAILED",
-      err?.message || err
-    );
-  }
-
-
-  // HTTPS test
-  await new Promise((resolve) => {
-
-    const request =
-      require("https").get(
-        "https://discord.com/",
-        {
-          timeout: 10000
-        },
-        (response) => {
-
-          console.log(
-            `Discord HTTPS (discord.com): OK -> HTTP ${response.statusCode}`
-          );
-
-          response.resume();
-
-          response.on(
-            "end",
-            resolve
-          );
-        }
-      );
-
-    request.on("timeout", () => {
-
-      console.error(
-        "Discord HTTPS (discord.com): TIMEOUT"
-      );
-
-      request.destroy();
-
-      resolve();
-    });
-
-    request.on("error", (err) => {
-
-      console.error(
-        "Discord HTTPS (discord.com): FAILED",
-        err?.message || err
-      );
-
-      resolve();
-    });
-  });
-
-
-  // TLS test
-  await new Promise((resolve) => {
-
-    const socket =
-      tls.connect({
-        host: "gateway.discord.gg",
-        port: 443,
-        servername: "gateway.discord.gg",
-        rejectUnauthorized: true,
-        timeout: 10000
-      });
-
-    socket.once(
-      "secureConnect",
-      () => {
-
-        console.log(
-          "Discord Gateway TLS (gateway.discord.gg:443): OK"
-        );
-
-        socket.destroy();
-
-        resolve();
-      }
-    );
-
-    socket.once(
-      "timeout",
-      () => {
-
-        console.error(
-          "Discord Gateway TLS: TIMEOUT"
-        );
-
-        socket.destroy();
-
-        resolve();
-      }
-    );
-
-    socket.once(
-      "error",
-      (err) => {
-
-        console.error(
-          "Discord Gateway TLS: FAILED",
-          err?.message || err
-        );
-
-        socket.destroy();
-
-        resolve();
-      }
-    );
-  });
-
-
-  console.log("");
-  console.log("========================================");
-  console.log("Discord network diagnostic finished.");
-  console.log("========================================");
-}
-
-
-// ============================================================
-// START
-// ============================================================
+);
 
 async function start() {
-
   await initDb();
-
 
   const port =
     Number(
       process.env.PORT || 10000
     );
 
-
   app.listen(
     port,
     "0.0.0.0",
     () => {
-
       console.log(
         `HTTP server listening on ${port}`
       );
     }
   );
 
+  console.log(
+    "========================================"
+  );
 
-  // First verify basic Discord connectivity.
-  await runDiscordNetworkDiagnostic();
+  console.log(
+    "Starting All-In-One Approver"
+  );
 
+  console.log(
+    "========================================"
+  );
 
-  // Then independently verify that the Gateway
-  // can complete a WebSocket upgrade and send HELLO.
-  const rawResult =
-    await runRawDiscordWebSocketDiagnostic();
+  console.log(
+    `Token loaded: ${!!TOKEN} (${safeTokenPreview()})`
+  );
 
+  await checkDiscordNetwork();
 
-  if (
-    rawResult?.ok &&
-    rawResult?.hello
-  ) {
-
-    console.log("");
-    console.log(
-      "Raw WebSocket works. Starting discord.js login..."
-    );
-
-  } else {
-
-    console.error("");
-    console.error(
-      "Raw WebSocket diagnostic failed."
-    );
-
-    console.error(
-      "Skipping discord.js login because the Gateway test failed."
-    );
-
-    return;
-  }
-
-
-  // Finally start discord.js.
-  loginDiscord("startup");
+  connectGateway(
+    "startup"
+  );
 }
 
-
-start().catch((err) => {
-
+start().catch(error => {
   console.error(
     "Fatal startup error:",
-    err?.stack || err
+    error?.stack || error
   );
 
   process.exit(1);
