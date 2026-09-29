@@ -11,6 +11,9 @@ const {
 
 const express = require("express");
 const { Pool } = require("pg");
+const dns = require("dns").promises;
+const https = require("https");
+const tls = require("tls");
 
 for (const name of [
   "DISCORD_TOKEN",
@@ -40,6 +43,7 @@ const pool = new Pool({
     rejectUnauthorized: false
   }
 });
+
 
 // =========================
 // DISCORD READY
@@ -81,6 +85,7 @@ client.once("ready", async () => {
         "Could not find APPROVAL_CHANNEL_ID guild; slash commands were not registered."
       );
     }
+
   } catch (err) {
     console.error(
       "Slash-command registration failed:",
@@ -88,6 +93,7 @@ client.once("ready", async () => {
     );
   }
 });
+
 
 // =========================
 // DISCORD EVENTS
@@ -126,6 +132,7 @@ client.on("shardReady", (shardId) => {
     `Discord shard ${shardId} is ready.`
   );
 });
+
 
 // =========================
 // DATABASE
@@ -166,6 +173,7 @@ async function initDb() {
 
   console.log("Database initialized.");
 }
+
 
 // =========================
 // LOG NEW ROBLOX USER
@@ -233,6 +241,7 @@ async function logNewHubUser(userId, username) {
         `User ID: \`${id}\``,
       components: [logRow]
     });
+
   } catch (err) {
     console.error(
       "Could not send new-user log:",
@@ -262,6 +271,7 @@ async function logNewHubUser(userId, username) {
 
   return true;
 }
+
 
 // =========================
 // ACCESS STATUS
@@ -301,6 +311,7 @@ async function getPermanentStatus(userId) {
   return "none";
 }
 
+
 async function getSessionDecision(userId, sessionId) {
   const result = await pool.query(
     `
@@ -320,6 +331,7 @@ async function getSessionDecision(userId, sessionId) {
     ? result.rows[0].decision
     : "none";
 }
+
 
 async function setSessionDecision(
   userId,
@@ -355,6 +367,7 @@ async function setSessionDecision(
   );
 }
 
+
 // =========================
 // WHITELIST / BLACKLIST
 // =========================
@@ -385,6 +398,7 @@ async function addWhitelist(userId, username) {
     [String(userId)]
   );
 }
+
 
 async function addBlacklist(userId, username) {
   await pool.query(
@@ -421,6 +435,7 @@ async function addBlacklist(userId, username) {
   );
 }
 
+
 async function removeWhitelist(userId) {
   const result = await pool.query(
     `
@@ -433,6 +448,7 @@ async function removeWhitelist(userId) {
   return result.rowCount > 0;
 }
 
+
 async function removeBlacklist(userId) {
   const result = await pool.query(
     `
@@ -444,6 +460,7 @@ async function removeBlacklist(userId) {
 
   return result.rowCount > 0;
 }
+
 
 async function getLists() {
   const white = await pool.query(
@@ -467,6 +484,7 @@ async function getLists() {
     blacklist: black.rows
   };
 }
+
 
 // =========================
 // SLASH COMMANDS
@@ -552,6 +570,7 @@ const slashCommands = [
   }
 ];
 
+
 // =========================
 // WEB SERVER
 // =========================
@@ -563,6 +582,7 @@ app.get("/", (_req, res) => {
       : "All-In-One Approver web service is online, but the Discord bot is not connected."
   );
 });
+
 
 // =========================
 // WAKE
@@ -597,6 +617,7 @@ app.get("/wake", (_req, res) => {
   });
 });
 
+
 // =========================
 // HEALTH
 // =========================
@@ -609,6 +630,7 @@ app.get("/health", (_req, res) => {
     slashCommandsRegistered
   });
 });
+
 
 // =========================
 // ROBLOX CHECK
@@ -710,6 +732,7 @@ app.get("/check", async (req, res) => {
     });
   }
 });
+
 
 // =========================
 // ACCESS REQUEST
@@ -910,6 +933,7 @@ app.post("/request", async (req, res) => {
   }
 });
 
+
 // =========================
 // DISCORD INTERACTIONS
 // =========================
@@ -957,6 +981,7 @@ client.on(
       });
     }
 
+
     // SLASH COMMANDS
     if (interaction.isChatInputCommand()) {
 
@@ -990,6 +1015,7 @@ client.on(
           ephemeral: true
         });
 
+
         // /whitelist
         if (command === "whitelist") {
 
@@ -1010,6 +1036,7 @@ client.on(
           );
         }
 
+
         // /blacklist
         if (command === "blacklist") {
 
@@ -1029,6 +1056,7 @@ client.on(
             `(UserId: \`${userId}\`).`
           );
         }
+
 
         // /unwhitelist
         if (command === "unwhitelist") {
@@ -1051,6 +1079,7 @@ client.on(
           );
         }
 
+
         // /unblacklist
         if (command === "unblacklist") {
 
@@ -1071,6 +1100,7 @@ client.on(
               : `ℹ️ UserId \`${userId}\` was not on the permanent blacklist.`
           );
         }
+
 
         // /list
         if (command === "list") {
@@ -1123,6 +1153,7 @@ client.on(
           });
         }
 
+
         return interaction.editReply(
           "Unknown command."
         );
@@ -1157,6 +1188,7 @@ client.on(
       return;
     }
 
+
     // BUTTONS
     if (!interaction.isButton()) {
       return;
@@ -1186,6 +1218,7 @@ client.on(
         .join(":") ||
       "unknown";
 
+
     try {
 
       // ACCEPT
@@ -1210,6 +1243,7 @@ client.on(
         return;
       }
 
+
       // DENY
       if (action === "deny") {
 
@@ -1231,6 +1265,7 @@ client.on(
 
         return;
       }
+
 
       // WHITELIST
       if (action === "whitelist") {
@@ -1257,6 +1292,7 @@ client.on(
 
         return;
       }
+
 
       // BLACKLIST
       if (action === "blacklist") {
@@ -1300,15 +1336,208 @@ client.on(
   }
 );
 
+
+// =========================
+// DISCORD NETWORK DIAGNOSTIC
+// =========================
+
+function testHttpsConnection(
+  hostname,
+  path = "/",
+  timeoutMs = 10000
+) {
+  return new Promise((resolve) => {
+    const request = https.get(
+      {
+        hostname,
+        path,
+        method: "GET",
+        headers: {
+          "User-Agent": "All-In-One-Approver-Diagnostic"
+        }
+      },
+      (response) => {
+        response.resume();
+
+        response.on("end", () => {
+          resolve({
+            ok: true,
+            status: response.statusCode
+          });
+        });
+      }
+    );
+
+    request.setTimeout(
+      timeoutMs,
+      () => {
+        request.destroy(
+          new Error("HTTPS connection timed out")
+        );
+      }
+    );
+
+    request.on("error", (err) => {
+      resolve({
+        ok: false,
+        error: err?.message || String(err),
+        code: err?.code || null
+      });
+    });
+  });
+}
+
+
+function testGatewayTls(
+  hostname = "gateway.discord.gg",
+  port = 443,
+  timeoutMs = 10000
+) {
+  return new Promise((resolve) => {
+    let finished = false;
+
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      resolve(result);
+    };
+
+    const socket = tls.connect({
+      host: hostname,
+      port,
+      servername: hostname,
+      timeout: timeoutMs
+    });
+
+    socket.once("secureConnect", () => {
+      finish({
+        ok: true,
+        authorized: socket.authorized,
+        authorizationError:
+          socket.authorizationError || null
+      });
+
+      socket.destroy();
+    });
+
+    socket.once("timeout", () => {
+      finish({
+        ok: false,
+        error: "TLS connection timed out"
+      });
+
+      socket.destroy();
+    });
+
+    socket.once("error", (err) => {
+      finish({
+        ok: false,
+        error: err?.message || String(err),
+        code: err?.code || null
+      });
+    });
+  });
+}
+
+
+async function diagnoseDiscordNetwork() {
+  console.log("========================================");
+  console.log("Discord network diagnostic starting...");
+  console.log("========================================");
+
+  // 1. Test DNS for Discord's normal API host.
+  try {
+    const result = await dns.lookup("discord.com");
+
+    console.log(
+      `Discord DNS (discord.com): OK -> ${result.address}`
+    );
+  } catch (err) {
+    console.error(
+      "Discord DNS (discord.com): FAILED ->",
+      err?.message || err
+    );
+  }
+
+  // 2. Test DNS for the actual Gateway host used by Discord.
+  try {
+    const result = await dns.lookup("gateway.discord.gg");
+
+    console.log(
+      `Discord Gateway DNS (gateway.discord.gg): OK -> ${result.address}`
+    );
+  } catch (err) {
+    console.error(
+      "Discord Gateway DNS (gateway.discord.gg): FAILED ->",
+      err?.message || err
+    );
+  }
+
+  // 3. Test normal HTTPS access to Discord.
+  const httpsResult = await testHttpsConnection(
+    "discord.com",
+    "/",
+    10000
+  );
+
+  if (httpsResult.ok) {
+    console.log(
+      `Discord HTTPS (discord.com): OK -> HTTP ${httpsResult.status}`
+    );
+  } else {
+    console.error(
+      "Discord HTTPS (discord.com): FAILED ->",
+      httpsResult.error,
+      httpsResult.code
+        ? `(code: ${httpsResult.code})`
+        : ""
+    );
+  }
+
+  // 4. Test TCP/TLS reachability to Discord's Gateway host.
+  // This does NOT log in or send the bot token.
+  const tlsResult = await testGatewayTls();
+
+  if (tlsResult.ok) {
+    console.log(
+      "Discord Gateway TLS (gateway.discord.gg:443): OK"
+    );
+
+    if (!tlsResult.authorized) {
+      console.warn(
+        "Discord Gateway TLS certificate was not reported as authorized:",
+        tlsResult.authorizationError || "unknown certificate error"
+      );
+    }
+  } else {
+    console.error(
+      "Discord Gateway TLS (gateway.discord.gg:443): FAILED ->",
+      tlsResult.error,
+      tlsResult.code
+        ? `(code: ${tlsResult.code})`
+        : ""
+    );
+  }
+
+  console.log("========================================");
+  console.log("Discord network diagnostic finished.");
+  console.log("========================================");
+}
+
+
 // =========================
 // DISCORD LOGIN
 // =========================
 
-async function loginDiscord(reason = "startup") {
+async function loginDiscord(
+  reason = "startup"
+) {
+
   if (client.isReady()) {
     console.log(
       `Discord is already connected; ignoring login request (${reason}).`
     );
+
     return true;
   }
 
@@ -1316,6 +1545,7 @@ async function loginDiscord(reason = "startup") {
     console.log(
       `Discord login is already in progress; ignoring login request (${reason}).`
     );
+
     return false;
   }
 
@@ -1323,6 +1553,7 @@ async function loginDiscord(reason = "startup") {
     console.error(
       "DISCORD_TOKEN is missing; cannot connect to Discord."
     );
+
     return false;
   }
 
@@ -1333,30 +1564,14 @@ async function loginDiscord(reason = "startup") {
   );
 
   try {
-    console.log(
-      "Connecting to Discord Gateway..."
+
+    // IMPORTANT:
+    // Do NOT manually call Discord's /gateway endpoint.
+    // discord.js handles the Gateway connection itself.
+
+    await client.login(
+      process.env.DISCORD_TOKEN
     );
-
-    const loginPromise =
-      client.login(
-        process.env.DISCORD_TOKEN
-      );
-
-    const timeoutPromise =
-      new Promise((_, reject) => {
-        setTimeout(() => {
-          reject(
-            new Error(
-              "Discord login timed out after 45 seconds. The Discord Gateway may be blocked or rate-limited."
-            )
-          );
-        }, 45000);
-      });
-
-    await Promise.race([
-      loginPromise,
-      timeoutPromise
-    ]);
 
     console.log(
       "Discord login call completed; waiting for READY event..."
@@ -1398,9 +1613,11 @@ async function loginDiscord(reason = "startup") {
     return false;
 
   } finally {
+
     loginInProgress = false;
   }
 }
+
 
 // =========================
 // START
@@ -1425,8 +1642,11 @@ async function start() {
     }
   );
 
+  await diagnoseDiscordNetwork();
+
   loginDiscord("startup");
 }
+
 
 start().catch((err) => {
 
